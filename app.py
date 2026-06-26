@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import math
 import tempfile
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -231,23 +232,57 @@ def calculate_sheet(sheet: str, data: dict):
     raise ValueError("Ce type de caisse n'est pas encore migré.")
 
 
-def euro_text(value):
+def ceil_text(value):
+    if value in (None, ""):
+        return "-"
     try:
-        v = float(value or 0)
-        return f"{v:,.2f} €".replace(",", " ").replace(".", ",")
+        return f"{math.ceil(float(value)):,.0f}".replace(",", " ")
     except Exception:
         return str(value or "-")
 
 
+def euro_text(value):
+    txt = ceil_text(value)
+    return "-" if txt == "-" else f"{txt} €"
+
+
 def num_text(value, suffix=""):
-    if value in (None, ""):
-        return "-"
+    txt = ceil_text(value)
+    return "-" if txt == "-" else f"{txt}{suffix}"
+
+
+def load_parametres_matiere():
+    """Paramètres modifiables issus de la feuille Prix Matiere."""
+    path = DATA_DIR / "parametres_matiere.json"
+    default = {"marge_cession_percent": 30}
+    if not path.exists():
+        return default
     try:
-        v = float(value)
-        txt = f"{v:,.2f}".replace(",", " ").replace(".", ",")
-        return f"{txt}{suffix}"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return {**default, **data}
     except Exception:
-        return f"{value}{suffix}"
+        return default
+
+
+def taux_marge_cession():
+    params = load_parametres_matiere()
+    value = params.get("marge_cession_percent", 30)
+    try:
+        return float(str(value).replace(",", ".")) / 100.0
+    except Exception:
+        return 0.30
+
+
+def enrich_result_with_cession(result: dict) -> dict:
+    """Ajoute le prix de cession = prix d'achat + marge paramétrable."""
+    enriched = dict(result or {})
+    prix_achat = as_float(enriched.get("prix_vente"), None)
+    marge = taux_marge_cession()
+    if prix_achat is not None:
+        enriched["prix_achat"] = prix_achat
+        enriched["marge_cession_percent"] = round(marge * 100, 4)
+        enriched["prix_cession"] = prix_achat * (1 + marge)
+    return enriched
 
 
 def notice_for(sheet: str, data: dict):
@@ -288,6 +323,7 @@ def notice_for(sheet: str, data: dict):
 
 def generate_internal_fiche_pdf(sheet: str, data: dict, result: dict) -> bytes:
     """Génère une fiche chiffrage interne ESI sur une seule page PDF."""
+    result = enrich_result_with_cession(result)
     notice = notice_for(sheet, data)
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         pdf_path = Path(tmp.name)
@@ -342,7 +378,7 @@ def generate_internal_fiche_pdf(sheet: str, data: dict, result: dict) -> bytes:
         ("Dimensions extérieures", dim),
         ("Poids caisse", num_text(result.get("poids_caisse"), " kg")),
         ("Bilan carbone", num_text(result.get("bilan_carbone"), " kg CO2e")),
-        ("Prix d'achat", euro_text(result.get("prix_vente"))),
+        ("Prix de cession", euro_text(result.get("prix_cession"))),
     ]
     y -= 4*mm
     card_w = (w - 2*margin - 8*mm) / 2
@@ -423,6 +459,7 @@ class Handler(BaseHTTPRequestHandler):
                 "onglets": load_onglets(),
                 "classiques": CLASSIQUES,
                 "migres": sorted(MIGRES),
+                "parametres_matiere": load_parametres_matiere(),
                 "deployment": {
                     "render": True,
                     "supabase_configured": bool(os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_ANON_KEY")),
@@ -448,7 +485,7 @@ class Handler(BaseHTTPRequestHandler):
             raw = self.rfile.read(length) if length else b"{}"
             try:
                 data = json.loads(raw.decode("utf-8") or "{}")
-                result = calculate_sheet(sheet, data)
+                result = enrich_result_with_cession(calculate_sheet(sheet, data))
                 return self.send_json({"ok": True, "sheet": sheet, "result": {k: fmt(v) for k, v in result.items()}})
             except Exception as exc:
                 return self.send_json({"ok": False, "error": str(exc)}, status=500)
