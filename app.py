@@ -367,11 +367,40 @@ def notice_record_to_api(record: dict):
     }
 
 
+def notice_match_values(sheet: str, data: dict) -> tuple[str, str, str]:
+    """Valeurs normalisées utilisées pour retrouver une notice.
+    On garde la clé stable, mais on accepte aussi les anciens enregistrements
+    dont la clé aurait été construite différemment.
+    """
+    isolant = data.get("type_isolant") or "Aucun"
+    calage = (
+        data.get("type_calage")
+        or data.get("separations")
+        or data.get("option_calage")
+        or data.get("base")
+        or "Aucun"
+    )
+    return slugify(sheet), slugify(isolant), slugify(calage)
+
+
 def find_notice_record(sheet: str, data: dict):
     key = notice_key(sheet, data)
-    for record in load_notices_index().get("notices", []):
+    sheet_s, isolant_s, calage_s = notice_match_values(sheet, data)
+    notices = load_notices_index().get("notices", [])
+
+    # 1) Recherche par clé exacte
+    for record in notices:
         if record.get("key") == key:
             return record
+
+    # 2) Recherche tolérante par champs enregistrés
+    for record in notices:
+        r_sheet = slugify(record.get("sheet") or "")
+        r_isolant = slugify(record.get("type_isolant") or record.get("isolant") or "Aucun")
+        r_calage = slugify(record.get("type_calage") or record.get("calage") or record.get("separations") or "Aucun")
+        if (r_sheet, r_isolant, r_calage) == (sheet_s, isolant_s, calage_s):
+            return record
+
     return None
 
 
