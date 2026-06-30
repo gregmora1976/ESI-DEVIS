@@ -460,6 +460,47 @@ def notice_for_api(sheet: str, data: dict):
         return {"title": legacy["title"], "pdf": "/" + pdf_rel, "preview": "/" + preview_rel, "key": notice_key(sheet, data), "auto": False}
     return None
 
+
+def parse_multipart_form(headers, body: bytes) -> tuple[dict, dict]:
+    """Parse un formulaire multipart/form-data sans module cgi (compatible Python 3.13/3.14).
+    Retourne (fields, files) avec files[name] = {filename, content, content_type}.
+    """
+    from email.parser import BytesParser
+    from email.policy import default
+
+    content_type = headers.get("Content-Type", "")
+    if "multipart/form-data" not in content_type.lower():
+        raise ValueError("Requête multipart/form-data attendue.")
+
+    raw = (
+        f"Content-Type: {content_type}\r\n"
+        "MIME-Version: 1.0\r\n\r\n"
+    ).encode("utf-8") + body
+
+    message = BytesParser(policy=default).parsebytes(raw)
+    fields: dict[str, str] = {}
+    files: dict[str, dict] = {}
+
+    for part in message.iter_parts():
+        disposition = part.get("Content-Disposition", "")
+        if "form-data" not in disposition:
+            continue
+        name = part.get_param("name", header="Content-Disposition")
+        filename = part.get_filename()
+        payload = part.get_payload(decode=True) or b""
+        if not name:
+            continue
+        if filename:
+            files[name] = {
+                "filename": filename,
+                "content": payload,
+                "content_type": part.get_content_type(),
+            }
+        else:
+            charset = part.get_content_charset() or "utf-8"
+            fields[name] = payload.decode(charset, errors="replace")
+    return fields, files
+
 def generate_internal_fiche_pdf(sheet: str, data: dict, result: dict) -> bytes:
     """Génère une fiche chiffrage interne ESI sur une seule page PDF."""
     result = enrich_result_with_cession(result)
@@ -643,25 +684,28 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 return self.send_json({"ok": False, "error": str(exc)}, status=500)
         if parsed.path == "/api/notice/associate":
-            import cgi
             try:
-                form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={
-                    "REQUEST_METHOD": "POST",
-                    "CONTENT_TYPE": self.headers.get("Content-Type", ""),
-                })
-                sheet = form.getfirst("sheet", "")
-                data_raw = form.getfirst("data", "{}")
-                title = form.getfirst("title", "")
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                body = self.rfile.read(length) if length else b""
+                fields, files = parse_multipart_form(self.headers, body)
+
+                sheet = fields.get("sheet", "")
+                data_raw = fields.get("data", "{}")
+                title = fields.get("title", "")
                 data = json.loads(data_raw or "{}")
-                file_item = form["pdf"] if "pdf" in form else None
+                file_item = files.get("pdf")
+
                 if not sheet:
                     return self.send_json({"ok": False, "error": "Type de caisse manquant."}, status=400)
-                if not file_item or not getattr(file_item, "filename", ""):
+                if not file_item or not file_item.get("filename"):
                     return self.send_json({"ok": False, "error": "PDF manquant."}, status=400)
-                if not str(file_item.filename).lower().endswith(".pdf"):
+                if not str(file_item.get("filename", "")).lower().endswith(".pdf"):
                     return self.send_json({"ok": False, "error": "Le fichier doit être un PDF."}, status=400)
+                if not file_item.get("content"):
+                    return self.send_json({"ok": False, "error": "Le PDF est vide."}, status=400)
+
                 with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-                    shutil.copyfileobj(file_item.file, tmp)
+                    tmp.write(file_item["content"])
                     tmp_path = Path(tmp.name)
                 try:
                     record = register_notice(sheet, data, title, tmp_path)
