@@ -375,14 +375,52 @@ def find_notice_record(sheet: str, data: dict):
     return None
 
 
+def next_notice_id(index: dict) -> int:
+    """Retourne le prochain identifiant numérique pour les notices auto."""
+    max_id = 0
+    for record in index.get("notices", []):
+        try:
+            max_id = max(max_id, int(record.get("id") or 0))
+        except Exception:
+            pass
+    return max_id + 1
+
+
+def notice_category_dir(sheet: str) -> str:
+    """Dossier lisible pour ranger les notices ajoutées depuis l'application."""
+    mapping = {
+        "T1": "T1",
+        "T1-T6": "T1-T6",
+        "MRT": "MRT",
+        "T1-T3 MRT": "T1-T3-MRT",
+        "T à Glissières": "T-Glissieres",
+        "T Séparations mousse": "T-Separations-Mousse",
+        "Objet 1": "Objet1",
+    }
+    return mapping.get(sheet, slugify(sheet))
+
+
 def register_notice(sheet: str, data: dict, title: str, source_pdf: Path) -> dict:
     key = notice_key(sheet, data)
-    notices_dir = ROOT / "assets" / "notices_auto"
-    notices_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"{key}.pdf"
-    dest = notices_dir / filename
+    index = load_notices_index()
+
+    # Si une notice existait déjà pour cette combinaison, on la remplace proprement
+    # tout en gardant un nom de fichier simple et stable.
+    old_record = None
+    for record in index.get("notices", []):
+        if record.get("key") == key:
+            old_record = record
+            break
+
+    notice_id = int(old_record.get("id")) if old_record and old_record.get("id") else next_notice_id(index)
+    folder = ROOT / "assets" / "notices" / "Auto" / notice_category_dir(sheet)
+    folder.mkdir(parents=True, exist_ok=True)
+    filename = f"{notice_id:04d}.pdf"
+    dest = folder / filename
     shutil.copyfile(source_pdf, dest)
+
     record = {
+        "id": notice_id,
         "key": key,
         "sheet": sheet,
         "type_isolant": data.get("type_isolant") or "Aucun",
@@ -393,9 +431,10 @@ def register_notice(sheet: str, data: dict, title: str, source_pdf: Path) -> dic
         "auto": True,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
     }
-    index = load_notices_index()
+
     notices = [r for r in index.get("notices", []) if r.get("key") != key]
     notices.append(record)
+    notices.sort(key=lambda r: int(r.get("id") or 0))
     index["notices"] = notices
     save_notices_index(index)
     return record
