@@ -341,6 +341,36 @@ def save_notices_index(index: dict) -> None:
     notices_index_path().write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+
+
+def render_pdf_first_page_to_png(pdf_path: Path, png_path: Path) -> bool:
+    """Génère un aperçu PNG de la première page du PDF.
+    Compatible Render/Python 3.14 grâce à pypdfium2.
+    """
+    try:
+        import pypdfium2 as pdfium
+        png_path.parent.mkdir(parents=True, exist_ok=True)
+        pdf = pdfium.PdfDocument(str(pdf_path))
+        if len(pdf) == 0:
+            return False
+        page = pdf[0]
+        bitmap = page.render(scale=1.8)
+        image = bitmap.to_pil()
+        if image.mode not in ("RGB", "RGBA"):
+            image = image.convert("RGB")
+        image.save(str(png_path), "PNG")
+        try:
+            page.close()
+        except Exception:
+            pass
+        try:
+            pdf.close()
+        except Exception:
+            pass
+        return png_path.exists()
+    except Exception:
+        return False
+
 def notice_record_to_doc(record: dict):
     if not record:
         return None
@@ -447,6 +477,8 @@ def register_notice(sheet: str, data: dict, title: str, source_pdf: Path) -> dic
     filename = f"{notice_id:04d}.pdf"
     dest = folder / filename
     shutil.copyfile(source_pdf, dest)
+    preview_path = dest.with_suffix(".png")
+    preview_ok = render_pdf_first_page_to_png(dest, preview_path)
 
     record = {
         "id": notice_id,
@@ -456,7 +488,7 @@ def register_notice(sheet: str, data: dict, title: str, source_pdf: Path) -> dic
         "type_calage": data.get("type_calage") or data.get("separations") or data.get("option_calage") or data.get("base") or "Aucun",
         "title": title or f"Notice technique - {sheet}",
         "pdf": str(dest.relative_to(ROOT)).replace("\\", "/"),
-        "preview": "",
+        "preview": str(preview_path.relative_to(ROOT)).replace("\\", "/") if preview_ok else "",
         "auto": True,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
     }
@@ -648,8 +680,15 @@ def generate_internal_fiche_pdf(sheet: str, data: dict, result: dict) -> bytes:
     box_w, box_h = w - 2*margin, y - box_y
     c.setStrokeColor(line); c.setFillColor(colors.white)
     c.roundRect(box_x, box_y, box_w, box_h, 5*mm, fill=1, stroke=1)
-    if notice and notice["preview"].exists():
-        img = ImageReader(str(notice["preview"]))
+    preview_path = None
+    if notice:
+        preview_path = notice.get("preview")
+        if (not preview_path or not preview_path.exists()) and notice.get("pdf") and notice["pdf"].exists():
+            tmp_preview = Path(tempfile.gettempdir()) / f"notice_preview_{abs(hash(str(notice['pdf'])))}.png"
+            if render_pdf_first_page_to_png(notice["pdf"], tmp_preview):
+                preview_path = tmp_preview
+    if notice and preview_path and preview_path.exists():
+        img = ImageReader(str(preview_path))
         iw, ih = img.getSize()
         scale = min((box_w - 10*mm)/iw, (box_h - 13*mm)/ih)
         draw_w, draw_h = iw*scale, ih*scale
