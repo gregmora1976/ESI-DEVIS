@@ -5,10 +5,12 @@ import mimetypes
 import os
 import math
 import tempfile
+import shutil
+import unicodedata
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlparse, parse_qs
 
 from matrice_caisses.t1 import T1Inputs, calculer_t1, options_t1
 from matrice_caisses.t1_t6 import T1T6Inputs, OeuvreT1T6, calculer_t1_t6, options_t1_t6
@@ -285,8 +287,122 @@ def enrich_result_with_cession(result: dict) -> dict:
     return enriched
 
 
-def notice_for(sheet: str, data: dict):
-    """Retourne la notice PDF/preview selon la typologie et les options."""
+
+def slugify(value: str) -> str:
+    value = str(value or "").strip().lower()
+    value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    out = []
+    for ch in value:
+        if ch.isalnum():
+            out.append(ch)
+        elif ch in (" ", "-", "_", "/", "\\", "."):
+            out.append("_")
+    slug = "".join(out).strip("_")
+    while "__" in slug:
+        slug = slug.replace("__", "_")
+    return slug or "notice"
+
+
+def notice_key(sheet: str, data: dict) -> str:
+    """Clé stable : type de caisse + isolant + calage.
+    Pour les caisses sans champ type_calage, on utilise le champ le plus proche.
+    """
+    isolant = data.get("type_isolant") or "Aucun"
+    calage = (
+        data.get("type_calage")
+        or data.get("separations")
+        or data.get("option_calage")
+        or data.get("base")
+        or "Aucun"
+    )
+    return "|".join([slugify(sheet), slugify(isolant), slugify(calage)])
+
+
+def notices_index_path() -> Path:
+    return DATA_DIR / "notices_index.json"
+
+
+def load_notices_index() -> dict:
+    path = notices_index_path()
+    default = {"notices": []}
+    if not path.exists():
+        return default
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("notices"), list):
+            return data
+    except Exception:
+        pass
+    return default
+
+
+def save_notices_index(index: dict) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    notices_index_path().write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def notice_record_to_doc(record: dict):
+    if not record:
+        return None
+    rel_pdf = record.get("pdf") or ""
+    pdf = ROOT / rel_pdf
+    preview_rel = record.get("preview") or ""
+    preview = ROOT / preview_rel if preview_rel else pdf.with_suffix(".png")
+    return {"title": record.get("title") or "Notice technique", "pdf": pdf, "preview": preview}
+
+
+def notice_record_to_api(record: dict):
+    if not record:
+        return None
+    rel_pdf = record.get("pdf") or ""
+    rel_preview = record.get("preview") or ""
+    if not rel_preview and rel_pdf.lower().endswith(".pdf"):
+        rel_preview = rel_pdf[:-4] + ".png"
+    return {
+        "title": record.get("title") or "Notice technique",
+        "pdf": "/" + rel_pdf.lstrip("/"),
+        "preview": "/" + rel_preview.lstrip("/") if rel_preview else "",
+        "key": record.get("key") or "",
+        "auto": bool(record.get("auto")),
+    }
+
+
+def find_notice_record(sheet: str, data: dict):
+    key = notice_key(sheet, data)
+    for record in load_notices_index().get("notices", []):
+        if record.get("key") == key:
+            return record
+    return None
+
+
+def register_notice(sheet: str, data: dict, title: str, source_pdf: Path) -> dict:
+    key = notice_key(sheet, data)
+    notices_dir = ROOT / "assets" / "notices_auto"
+    notices_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{key}.pdf"
+    dest = notices_dir / filename
+    shutil.copyfile(source_pdf, dest)
+    record = {
+        "key": key,
+        "sheet": sheet,
+        "type_isolant": data.get("type_isolant") or "Aucun",
+        "type_calage": data.get("type_calage") or data.get("separations") or data.get("option_calage") or data.get("base") or "Aucun",
+        "title": title or f"Notice technique - {sheet}",
+        "pdf": str(dest.relative_to(ROOT)).replace("\\", "/"),
+        "preview": "",
+        "auto": True,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    index = load_notices_index()
+    notices = [r for r in index.get("notices", []) if r.get("key") != key]
+    notices.append(record)
+    index["notices"] = notices
+    save_notices_index(index)
+    return record
+
+
+def legacy_notice_for(sheet: str, data: dict):
+    """Anciennes notices codées en dur, conservées comme secours."""
     calage = str(data.get("type_calage") or "").lower()
     isolant = str(data.get("type_isolant") or "").lower()
 
@@ -319,6 +435,29 @@ def notice_for(sheet: str, data: dict):
                 return doc("Caisse objet - entourage mousse isotherme", "assets/notices/Objets/Objet1/caisse_objet_entourage_mousse_isotherme.pdf")
             return doc("Caisse objet - entourage mousse", "assets/notices/Objets/Objet1/caisse_objet_entourage_mousse.pdf")
 
+    return None
+
+
+def notice_for(sheet: str, data: dict):
+    """Retourne d'abord une notice associée depuis le registre, puis les anciennes notices de secours."""
+    registered = find_notice_record(sheet, data)
+    if registered:
+        return notice_record_to_doc(registered)
+    return legacy_notice_for(sheet, data)
+
+
+def notice_for_api(sheet: str, data: dict):
+    registered = find_notice_record(sheet, data)
+    if registered:
+        return notice_record_to_api(registered)
+    legacy = legacy_notice_for(sheet, data)
+    if legacy:
+        try:
+            pdf_rel = str(legacy["pdf"].relative_to(ROOT)).replace("\\", "/")
+            preview_rel = str(legacy["preview"].relative_to(ROOT)).replace("\\", "/")
+        except Exception:
+            return None
+        return {"title": legacy["title"], "pdf": "/" + pdf_rel, "preview": "/" + preview_rel, "key": notice_key(sheet, data), "auto": False}
     return None
 
 def generate_internal_fiche_pdf(sheet: str, data: dict, result: dict) -> bytes:
@@ -460,6 +599,7 @@ class Handler(BaseHTTPRequestHandler):
                 "classiques": CLASSIQUES,
                 "migres": sorted(MIGRES),
                 "parametres_matiere": load_parametres_matiere(),
+                "notices_count": len(load_notices_index().get("notices", [])),
                 "deployment": {
                     "render": True,
                     "supabase_configured": bool(os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_ANON_KEY")),
@@ -474,6 +614,8 @@ class Handler(BaseHTTPRequestHandler):
                     "Objet 1": options_objet1(),
                 },
             })
+        if parsed.path == "/api/notices":
+            return self.send_json(load_notices_index())
         safe = parsed.path.lstrip("/").replace("..", "")
         return self.send_file(ROOT / safe)
 
@@ -487,6 +629,48 @@ class Handler(BaseHTTPRequestHandler):
                 data = json.loads(raw.decode("utf-8") or "{}")
                 result = enrich_result_with_cession(calculate_sheet(sheet, data))
                 return self.send_json({"ok": True, "sheet": sheet, "result": {k: fmt(v) for k, v in result.items()}})
+            except Exception as exc:
+                return self.send_json({"ok": False, "error": str(exc)}, status=500)
+        if parsed.path == "/api/notice/find":
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                payload = json.loads(raw.decode("utf-8") or "{}")
+                sheet = payload.get("sheet") or ""
+                data = payload.get("data") or {}
+                found = notice_for_api(sheet, data)
+                return self.send_json({"ok": True, "notice": found})
+            except Exception as exc:
+                return self.send_json({"ok": False, "error": str(exc)}, status=500)
+        if parsed.path == "/api/notice/associate":
+            import cgi
+            try:
+                form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={
+                    "REQUEST_METHOD": "POST",
+                    "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+                })
+                sheet = form.getfirst("sheet", "")
+                data_raw = form.getfirst("data", "{}")
+                title = form.getfirst("title", "")
+                data = json.loads(data_raw or "{}")
+                file_item = form["pdf"] if "pdf" in form else None
+                if not sheet:
+                    return self.send_json({"ok": False, "error": "Type de caisse manquant."}, status=400)
+                if not file_item or not getattr(file_item, "filename", ""):
+                    return self.send_json({"ok": False, "error": "PDF manquant."}, status=400)
+                if not str(file_item.filename).lower().endswith(".pdf"):
+                    return self.send_json({"ok": False, "error": "Le fichier doit être un PDF."}, status=400)
+                with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                    shutil.copyfileobj(file_item.file, tmp)
+                    tmp_path = Path(tmp.name)
+                try:
+                    record = register_notice(sheet, data, title, tmp_path)
+                finally:
+                    try:
+                        tmp_path.unlink()
+                    except Exception:
+                        pass
+                return self.send_json({"ok": True, "notice": notice_record_to_api(record)})
             except Exception as exc:
                 return self.send_json({"ok": False, "error": str(exc)}, status=500)
         if parsed.path == "/api/fiche-pdf":
