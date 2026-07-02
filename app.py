@@ -341,36 +341,6 @@ def save_notices_index(index: dict) -> None:
     notices_index_path().write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-
-
-def render_pdf_first_page_to_png(pdf_path: Path, png_path: Path) -> bool:
-    """Génère un aperçu PNG de la première page du PDF.
-    Compatible Render/Python 3.14 grâce à pypdfium2.
-    """
-    try:
-        import pypdfium2 as pdfium
-        png_path.parent.mkdir(parents=True, exist_ok=True)
-        pdf = pdfium.PdfDocument(str(pdf_path))
-        if len(pdf) == 0:
-            return False
-        page = pdf[0]
-        bitmap = page.render(scale=1.8)
-        image = bitmap.to_pil()
-        if image.mode not in ("RGB", "RGBA"):
-            image = image.convert("RGB")
-        image.save(str(png_path), "PNG")
-        try:
-            page.close()
-        except Exception:
-            pass
-        try:
-            pdf.close()
-        except Exception:
-            pass
-        return png_path.exists()
-    except Exception:
-        return False
-
 def notice_record_to_doc(record: dict):
     if not record:
         return None
@@ -397,105 +367,35 @@ def notice_record_to_api(record: dict):
     }
 
 
-def notice_match_values(sheet: str, data: dict) -> tuple[str, str, str]:
-    """Valeurs normalisées utilisées pour retrouver une notice.
-    On garde la clé stable, mais on accepte aussi les anciens enregistrements
-    dont la clé aurait été construite différemment.
-    """
-    isolant = data.get("type_isolant") or "Aucun"
-    calage = (
-        data.get("type_calage")
-        or data.get("separations")
-        or data.get("option_calage")
-        or data.get("base")
-        or "Aucun"
-    )
-    return slugify(sheet), slugify(isolant), slugify(calage)
-
-
 def find_notice_record(sheet: str, data: dict):
     key = notice_key(sheet, data)
-    sheet_s, isolant_s, calage_s = notice_match_values(sheet, data)
-    notices = load_notices_index().get("notices", [])
-
-    # 1) Recherche par clé exacte
-    for record in notices:
+    for record in load_notices_index().get("notices", []):
         if record.get("key") == key:
             return record
-
-    # 2) Recherche tolérante par champs enregistrés
-    for record in notices:
-        r_sheet = slugify(record.get("sheet") or "")
-        r_isolant = slugify(record.get("type_isolant") or record.get("isolant") or "Aucun")
-        r_calage = slugify(record.get("type_calage") or record.get("calage") or record.get("separations") or "Aucun")
-        if (r_sheet, r_isolant, r_calage) == (sheet_s, isolant_s, calage_s):
-            return record
-
     return None
-
-
-def next_notice_id(index: dict) -> int:
-    """Retourne le prochain identifiant numérique pour les notices auto."""
-    max_id = 0
-    for record in index.get("notices", []):
-        try:
-            max_id = max(max_id, int(record.get("id") or 0))
-        except Exception:
-            pass
-    return max_id + 1
-
-
-def notice_category_dir(sheet: str) -> str:
-    """Dossier lisible pour ranger les notices ajoutées depuis l'application."""
-    mapping = {
-        "T1": "T1",
-        "T1-T6": "T1-T6",
-        "MRT": "MRT",
-        "T1-T3 MRT": "T1-T3-MRT",
-        "T à Glissières": "T-Glissieres",
-        "T Séparations mousse": "T-Separations-Mousse",
-        "Objet 1": "Objet1",
-    }
-    return mapping.get(sheet, slugify(sheet))
 
 
 def register_notice(sheet: str, data: dict, title: str, source_pdf: Path) -> dict:
     key = notice_key(sheet, data)
-    index = load_notices_index()
-
-    # Si une notice existait déjà pour cette combinaison, on la remplace proprement
-    # tout en gardant un nom de fichier simple et stable.
-    old_record = None
-    for record in index.get("notices", []):
-        if record.get("key") == key:
-            old_record = record
-            break
-
-    notice_id = int(old_record.get("id")) if old_record and old_record.get("id") else next_notice_id(index)
-    folder = ROOT / "assets" / "notices" / "Auto" / notice_category_dir(sheet)
-    folder.mkdir(parents=True, exist_ok=True)
-    filename = f"{notice_id:04d}.pdf"
-    dest = folder / filename
+    notices_dir = ROOT / "assets" / "notices_auto"
+    notices_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{key}.pdf"
+    dest = notices_dir / filename
     shutil.copyfile(source_pdf, dest)
-    preview_path = dest.with_suffix(".png")
-    preview_ok = render_pdf_first_page_to_png(dest, preview_path)
-
     record = {
-        "id": notice_id,
         "key": key,
         "sheet": sheet,
         "type_isolant": data.get("type_isolant") or "Aucun",
         "type_calage": data.get("type_calage") or data.get("separations") or data.get("option_calage") or data.get("base") or "Aucun",
         "title": title or f"Notice technique - {sheet}",
         "pdf": str(dest.relative_to(ROOT)).replace("\\", "/"),
-        "preview": str(preview_path.relative_to(ROOT)).replace("\\", "/") if preview_ok else "",
+        "preview": "",
         "auto": True,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
     }
-
+    index = load_notices_index()
     notices = [r for r in index.get("notices", []) if r.get("key") != key]
     notices.append(record)
-    notices.sort(key=lambda r: int(r.get("id") or 0))
     index["notices"] = notices
     save_notices_index(index)
     return record
@@ -559,47 +459,6 @@ def notice_for_api(sheet: str, data: dict):
             return None
         return {"title": legacy["title"], "pdf": "/" + pdf_rel, "preview": "/" + preview_rel, "key": notice_key(sheet, data), "auto": False}
     return None
-
-
-def parse_multipart_form(headers, body: bytes) -> tuple[dict, dict]:
-    """Parse un formulaire multipart/form-data sans module cgi (compatible Python 3.13/3.14).
-    Retourne (fields, files) avec files[name] = {filename, content, content_type}.
-    """
-    from email.parser import BytesParser
-    from email.policy import default
-
-    content_type = headers.get("Content-Type", "")
-    if "multipart/form-data" not in content_type.lower():
-        raise ValueError("Requête multipart/form-data attendue.")
-
-    raw = (
-        f"Content-Type: {content_type}\r\n"
-        "MIME-Version: 1.0\r\n\r\n"
-    ).encode("utf-8") + body
-
-    message = BytesParser(policy=default).parsebytes(raw)
-    fields: dict[str, str] = {}
-    files: dict[str, dict] = {}
-
-    for part in message.iter_parts():
-        disposition = part.get("Content-Disposition", "")
-        if "form-data" not in disposition:
-            continue
-        name = part.get_param("name", header="Content-Disposition")
-        filename = part.get_filename()
-        payload = part.get_payload(decode=True) or b""
-        if not name:
-            continue
-        if filename:
-            files[name] = {
-                "filename": filename,
-                "content": payload,
-                "content_type": part.get_content_type(),
-            }
-        else:
-            charset = part.get_content_charset() or "utf-8"
-            fields[name] = payload.decode(charset, errors="replace")
-    return fields, files
 
 def generate_internal_fiche_pdf(sheet: str, data: dict, result: dict) -> bytes:
     """Génère une fiche chiffrage interne ESI sur une seule page PDF."""
@@ -680,15 +539,8 @@ def generate_internal_fiche_pdf(sheet: str, data: dict, result: dict) -> bytes:
     box_w, box_h = w - 2*margin, y - box_y
     c.setStrokeColor(line); c.setFillColor(colors.white)
     c.roundRect(box_x, box_y, box_w, box_h, 5*mm, fill=1, stroke=1)
-    preview_path = None
-    if notice:
-        preview_path = notice.get("preview")
-        if (not preview_path or not preview_path.exists()) and notice.get("pdf") and notice["pdf"].exists():
-            tmp_preview = Path(tempfile.gettempdir()) / f"notice_preview_{abs(hash(str(notice['pdf'])))}.png"
-            if render_pdf_first_page_to_png(notice["pdf"], tmp_preview):
-                preview_path = tmp_preview
-    if notice and preview_path and preview_path.exists():
-        img = ImageReader(str(preview_path))
+    if notice and notice["preview"].exists():
+        img = ImageReader(str(notice["preview"]))
         iw, ih = img.getSize()
         scale = min((box_w - 10*mm)/iw, (box_h - 13*mm)/ih)
         draw_w, draw_h = iw*scale, ih*scale
@@ -791,28 +643,25 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 return self.send_json({"ok": False, "error": str(exc)}, status=500)
         if parsed.path == "/api/notice/associate":
+            import cgi
             try:
-                length = int(self.headers.get("Content-Length", "0") or 0)
-                body = self.rfile.read(length) if length else b""
-                fields, files = parse_multipart_form(self.headers, body)
-
-                sheet = fields.get("sheet", "")
-                data_raw = fields.get("data", "{}")
-                title = fields.get("title", "")
+                form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={
+                    "REQUEST_METHOD": "POST",
+                    "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+                })
+                sheet = form.getfirst("sheet", "")
+                data_raw = form.getfirst("data", "{}")
+                title = form.getfirst("title", "")
                 data = json.loads(data_raw or "{}")
-                file_item = files.get("pdf")
-
+                file_item = form["pdf"] if "pdf" in form else None
                 if not sheet:
                     return self.send_json({"ok": False, "error": "Type de caisse manquant."}, status=400)
-                if not file_item or not file_item.get("filename"):
+                if not file_item or not getattr(file_item, "filename", ""):
                     return self.send_json({"ok": False, "error": "PDF manquant."}, status=400)
-                if not str(file_item.get("filename", "")).lower().endswith(".pdf"):
+                if not str(file_item.filename).lower().endswith(".pdf"):
                     return self.send_json({"ok": False, "error": "Le fichier doit être un PDF."}, status=400)
-                if not file_item.get("content"):
-                    return self.send_json({"ok": False, "error": "Le PDF est vide."}, status=400)
-
                 with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-                    tmp.write(file_item["content"])
+                    shutil.copyfileobj(file_item.file, tmp)
                     tmp_path = Path(tmp.name)
                 try:
                     record = register_notice(sheet, data, title, tmp_path)
