@@ -21,6 +21,7 @@ from matrice_caisses.t1_t3_mrt import T1T3MRTInputs, MRTItem, calculer_t1_t3_mrt
 from matrice_caisses.t_glissieres import TGlissieresInputs, TableauGlissiere, calculer_t_glissieres, options_t_glissieres
 from matrice_caisses.t_separations_mousse import TSeparationsMousseInputs, OeuvreSeparationMousse, calculer_t_separations_mousse, options_t_separations_mousse
 from matrice_caisses.objet1 import Objet1Inputs, calculer_objet1, options_objet1
+from matrice_caisses.objet2a6 import Objet2A6Inputs, Objet2A6Item, calculer_objet2a6, options_objet2a6
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -43,7 +44,7 @@ CLASSIQUES = {
     "Objets": ["Objet 1", "Objet 2 à 6", "Tapisserie"],
     "Caissons / Wrapp": ["Wrapp"],
 }
-MIGRES = {"T1", "T1-T6", "MRT", "T1-T3 MRT", "T à Glissières", "T Séparations mousse", "Objet 1"}
+MIGRES = {"T1", "T1-T6", "MRT", "T1-T3 MRT", "T à Glissières", "T Séparations mousse", "Objet 1", "Objet 2 à 6"}
 
 
 def load_onglets():
@@ -221,6 +222,36 @@ def calculate_sheet(sheet: str, data: dict):
             client=data.get("client") or None,
         )
         return calculer_objet1(inputs)
+    if sheet == "Objet 2 à 6":
+        objets = []
+        for item in data.get("objets", []):
+            objets.append(Objet2A6Item(
+                longueur_cm=as_float(item.get("longueur_cm")),
+                largeur_cm=as_float(item.get("largeur_cm") or item.get("epaisseur_cm")),
+                hauteur_cm=as_float(item.get("hauteur_cm")),
+                type_calage=item.get("type_calage") or None,
+                plateau_interieur=item.get("plateau_interieur") or None,
+                base=item.get("base") or None,
+                nombre_calages=as_float(item.get("nombre_calages")),
+                type_mousse_calage=item.get("type_mousse_calage") or None,
+            ))
+        inputs = Objet2A6Inputs(
+            type_contreplaque=data.get("type_contreplaque") or None,
+            barres=data.get("barres") or None,
+            garnissage=data.get("garnissage") or None,
+            type_isolant=data.get("type_isolant") or None,
+            fermeture=data.get("fermeture") or None,
+            peinture=data.get("peinture") or None,
+            poignees=data.get("poignees") or None,
+            skis=data.get("skis") or None,
+            cuvette_au_dessus=data.get("cuvette_au_dessus") or None,
+            responsable_dossier=data.get("responsable_dossier") or data.get("demandeur") or None,
+            client=data.get("client") or None,
+            delai=data.get("delai") or data.get("dossier") or None,
+            objets=objets,
+        )
+        return calculer_objet2a6(inputs)
+
     if sheet == "MRT":
         inputs = MRTInputs(
             longueur_cm=as_float(data.get("longueur_cm")),
@@ -706,6 +737,7 @@ def notice_category_dir(sheet: str) -> str:
         "T à Glissières": "T-Glissieres",
         "T Séparations mousse": "T-Separations-Mousse",
         "Objet 1": "Objet1",
+        "Objet 2 à 6": "Objet2a6",
     }
     return mapping.get(sheet, slugify(sheet))
 
@@ -1054,6 +1086,7 @@ class Handler(BaseHTTPRequestHandler):
                     "T à Glissières": options_t_glissieres(),
                     "T Séparations mousse": options_t_separations_mousse(),
                     "Objet 1": options_objet1(),
+                    "Objet 2 à 6": options_objet2a6(),
                 },
             })
         if parsed.path == "/api/notices":
