@@ -10,7 +10,9 @@ import unicodedata
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse, parse_qs
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
+from urllib.parse import unquote, urlparse, parse_qs, quote
 
 from matrice_caisses.t1 import T1Inputs, calculer_t1, options_t1
 from matrice_caisses.t1_t6 import T1T6Inputs, OeuvreT1T6, calculer_t1_t6, options_t1_t6
@@ -318,11 +320,188 @@ def notice_key(sheet: str, data: dict) -> str:
     return "|".join([slugify(sheet), slugify(isolant), slugify(calage)])
 
 
+
 def notices_index_path() -> Path:
     return DATA_DIR / "notices_index.json"
 
 
+SUPABASE_BUCKET = os.getenv("SUPABASE_NOTICES_BUCKET", "notices-techniques")
+SUPABASE_TABLE = os.getenv("SUPABASE_NOTICES_TABLE", "notices_techniques")
+
+
+def supabase_configured() -> bool:
+    return bool(os.getenv("SUPABASE_URL") and (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")))
+
+
+def supabase_url() -> str:
+    return (os.getenv("SUPABASE_URL") or "").rstrip("/")
+
+
+def supabase_key() -> str:
+    return os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY") or ""
+
+
+def supabase_headers(extra: dict | None = None) -> dict:
+    key = supabase_key()
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+    }
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def supabase_public_url(path: str) -> str:
+    safe_path = "/".join(quote(part) for part in str(path).strip("/").split("/"))
+    return f"{supabase_url()}/storage/v1/object/public/{SUPABASE_BUCKET}/{safe_path}"
+
+
+def supabase_object_url(path: str) -> str:
+    safe_path = "/".join(quote(part) for part in str(path).strip("/").split("/"))
+    return f"{supabase_url()}/storage/v1/object/{SUPABASE_BUCKET}/{safe_path}"
+
+
+def http_json(url: str, method: str = "GET", payload=None, headers: dict | None = None):
+    data = None
+    all_headers = headers or {}
+    if payload is not None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        all_headers = {**all_headers, "Content-Type": "application/json"}
+    req = Request(url, data=data, headers=all_headers, method=method)
+    try:
+        with urlopen(req, timeout=30) as resp:
+            raw = resp.read()
+            if not raw:
+                return None
+            return json.loads(raw.decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Supabase HTTP {exc.code}: {detail}") from exc
+
+
+def download_url_to_file(url: str, suffix: str = "") -> Path | None:
+    if not url:
+        return None
+    try:
+        req = Request(url, headers=supabase_headers() if "/storage/v1/object/" in url and "/public/" not in url else {})
+        with urlopen(req, timeout=30) as resp:
+            data = resp.read()
+        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        tmp.write(data)
+        tmp.close()
+        return Path(tmp.name)
+    except Exception:
+        return None
+
+
+def upload_bytes_to_supabase(path: str, content: bytes, content_type: str) -> None:
+    if not supabase_configured():
+        raise RuntimeError("Supabase n'est pas configuré.")
+    req = Request(
+        supabase_object_url(path),
+        data=content,
+        headers=supabase_headers({"Content-Type": content_type, "x-upsert": "true"}),
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=60) as resp:
+            resp.read()
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Upload Supabase impossible ({exc.code}) : {detail}") from exc
+
+
+def normalize_notice_record(record: dict) -> dict:
+    if not record:
+        return {}
+    pdf_path = record.get("pdf_path") or record.get("pdf") or ""
+    preview_path = record.get("preview_path") or record.get("preview") or ""
+    return {
+        "id": record.get("id"),
+        "key": record.get("notice_key") or record.get("key") or "",
+        "sheet": record.get("sheet") or "",
+        "type_isolant": record.get("type_isolant") or record.get("isolant") or "Aucun",
+        "type_calage": record.get("type_calage") or record.get("calage") or record.get("separations") or "Aucun",
+        "title": record.get("title") or record.get("titre") or "Notice technique",
+        "pdf": pdf_path,
+        "preview": preview_path,
+        "pdf_url": record.get("pdf_url") or (supabase_public_url(pdf_path) if pdf_path and not str(pdf_path).startswith("assets/") else ""),
+        "preview_url": record.get("preview_url") or (supabase_public_url(preview_path) if preview_path and not str(preview_path).startswith("assets/") else ""),
+        "auto": bool(record.get("auto", True)),
+        "updated_at": record.get("updated_at"),
+    }
+
+
+def list_supabase_notices() -> list[dict]:
+    if not supabase_configured():
+        return []
+    url = f"{supabase_url()}/rest/v1/{SUPABASE_TABLE}?select=*&order=id.asc"
+    data = http_json(url, headers=supabase_headers({"Accept": "application/json"}))
+    return [normalize_notice_record(r) for r in (data or [])]
+
+
+def get_supabase_notice_by_key(key: str):
+    if not supabase_configured():
+        return None
+    url = f"{supabase_url()}/rest/v1/{SUPABASE_TABLE}?select=*&notice_key=eq.{quote(key, safe='')}&limit=1"
+    data = http_json(url, headers=supabase_headers({"Accept": "application/json"}))
+    if data:
+        return normalize_notice_record(data[0])
+    return None
+
+
+def get_supabase_notice_by_values(sheet: str, isolant: str, calage: str):
+    if not supabase_configured():
+        return None
+    url = (
+        f"{supabase_url()}/rest/v1/{SUPABASE_TABLE}?select=*"
+        f"&sheet_slug=eq.{quote(slugify(sheet), safe='')}"
+        f"&isolant_slug=eq.{quote(slugify(isolant), safe='')}"
+        f"&calage_slug=eq.{quote(slugify(calage), safe='')}"
+        f"&limit=1"
+    )
+    data = http_json(url, headers=supabase_headers({"Accept": "application/json"}))
+    if data:
+        return normalize_notice_record(data[0])
+    return None
+
+
+def upsert_supabase_notice(record: dict) -> dict:
+    url = f"{supabase_url()}/rest/v1/{SUPABASE_TABLE}?on_conflict=notice_key"
+    payload = {
+        "notice_key": record["key"],
+        "sheet": record["sheet"],
+        "sheet_slug": slugify(record["sheet"]),
+        "type_isolant": record["type_isolant"],
+        "isolant_slug": slugify(record["type_isolant"]),
+        "type_calage": record["type_calage"],
+        "calage_slug": slugify(record["type_calage"]),
+        "title": record["title"],
+        "pdf_path": record["pdf"],
+        "preview_path": record.get("preview") or "",
+        "pdf_url": record.get("pdf_url") or supabase_public_url(record["pdf"]),
+        "preview_url": record.get("preview_url") or (supabase_public_url(record["preview"]) if record.get("preview") else ""),
+        "auto": True,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    data = http_json(
+        url,
+        method="POST",
+        payload=payload,
+        headers=supabase_headers({"Prefer": "resolution=merge-duplicates,return=representation", "Accept": "application/json"}),
+    )
+    if data:
+        return normalize_notice_record(data[0])
+    return normalize_notice_record(payload)
+
+
 def load_notices_index() -> dict:
+    if supabase_configured():
+        try:
+            return {"notices": list_supabase_notices()}
+        except Exception:
+            pass
     path = notices_index_path()
     default = {"notices": []}
     if not path.exists():
@@ -339,7 +518,6 @@ def load_notices_index() -> dict:
 def save_notices_index(index: dict) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     notices_index_path().write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
-
 
 
 
@@ -371,27 +549,44 @@ def render_pdf_first_page_to_png(pdf_path: Path, png_path: Path) -> bool:
     except Exception:
         return False
 
+
 def notice_record_to_doc(record: dict):
     if not record:
         return None
+    record = normalize_notice_record(record)
     rel_pdf = record.get("pdf") or ""
-    pdf = ROOT / rel_pdf
-    preview_rel = record.get("preview") or ""
-    preview = ROOT / preview_rel if preview_rel else pdf.with_suffix(".png")
+    rel_preview = record.get("preview") or ""
+    pdf = None
+    preview = None
+    if rel_pdf:
+        local_pdf = ROOT / rel_pdf
+        if local_pdf.exists():
+            pdf = local_pdf
+        elif record.get("pdf_url"):
+            pdf = download_url_to_file(record["pdf_url"], ".pdf")
+    if rel_preview:
+        local_preview = ROOT / rel_preview
+        if local_preview.exists():
+            preview = local_preview
+        elif record.get("preview_url"):
+            preview = download_url_to_file(record["preview_url"], ".png")
+    elif pdf:
+        preview = pdf.with_suffix(".png")
     return {"title": record.get("title") or "Notice technique", "pdf": pdf, "preview": preview}
 
 
 def notice_record_to_api(record: dict):
     if not record:
         return None
+    record = normalize_notice_record(record)
     rel_pdf = record.get("pdf") or ""
     rel_preview = record.get("preview") or ""
-    if not rel_preview and rel_pdf.lower().endswith(".pdf"):
-        rel_preview = rel_pdf[:-4] + ".png"
+    pdf_url = record.get("pdf_url") or ("/" + rel_pdf.lstrip("/") if rel_pdf else "")
+    preview_url = record.get("preview_url") or ("/" + rel_preview.lstrip("/") if rel_preview else "")
     return {
         "title": record.get("title") or "Notice technique",
-        "pdf": "/" + rel_pdf.lstrip("/"),
-        "preview": "/" + rel_preview.lstrip("/") if rel_preview else "",
+        "pdf": pdf_url,
+        "preview": preview_url,
         "key": record.get("key") or "",
         "auto": bool(record.get("auto")),
     }
@@ -416,11 +611,23 @@ def notice_match_values(sheet: str, data: dict) -> tuple[str, str, str]:
 def find_notice_record(sheet: str, data: dict):
     key = notice_key(sheet, data)
     sheet_s, isolant_s, calage_s = notice_match_values(sheet, data)
+
+    if supabase_configured():
+        try:
+            record = get_supabase_notice_by_key(key)
+            if record:
+                return record
+            record = get_supabase_notice_by_values(sheet_s, isolant_s, calage_s)
+            if record:
+                return record
+        except Exception:
+            pass
+
     notices = load_notices_index().get("notices", [])
 
     # 1) Recherche par clé exacte
     for record in notices:
-        if record.get("key") == key:
+        if record.get("key") == key or record.get("notice_key") == key:
             return record
 
     # 2) Recherche tolérante par champs enregistrés
@@ -462,33 +669,71 @@ def notice_category_dir(sheet: str) -> str:
 def register_notice(sheet: str, data: dict, title: str, source_pdf: Path) -> dict:
     key = notice_key(sheet, data)
     index = load_notices_index()
+    isolant = data.get("type_isolant") or "Aucun"
+    calage = data.get("type_calage") or data.get("separations") or data.get("option_calage") or data.get("base") or "Aucun"
 
     # Si une notice existait déjà pour cette combinaison, on la remplace proprement
-    # tout en gardant un nom de fichier simple et stable.
     old_record = None
     for record in index.get("notices", []):
-        if record.get("key") == key:
+        if record.get("key") == key or record.get("notice_key") == key:
             old_record = record
             break
 
     notice_id = int(old_record.get("id")) if old_record and old_record.get("id") else next_notice_id(index)
-    folder = ROOT / "assets" / "notices" / "Auto" / notice_category_dir(sheet)
+    filename = f"{notice_id:04d}"
+    folder_name = notice_category_dir(sheet)
+
+    with open(source_pdf, "rb") as f:
+        pdf_bytes = f.read()
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        preview_path = Path(tmp.name)
+    preview_ok = render_pdf_first_page_to_png(source_pdf, preview_path)
+    preview_bytes = preview_path.read_bytes() if preview_ok else b""
+    try:
+        preview_path.unlink()
+    except Exception:
+        pass
+
+    if supabase_configured():
+        pdf_path = f"{folder_name}/{filename}.pdf"
+        preview_store_path = f"{folder_name}/{filename}.png" if preview_bytes else ""
+        upload_bytes_to_supabase(pdf_path, pdf_bytes, "application/pdf")
+        if preview_bytes:
+            upload_bytes_to_supabase(preview_store_path, preview_bytes, "image/png")
+        record = {
+            "id": notice_id,
+            "key": key,
+            "sheet": sheet,
+            "type_isolant": isolant,
+            "type_calage": calage,
+            "title": title or f"Notice technique - {sheet}",
+            "pdf": pdf_path,
+            "preview": preview_store_path,
+            "pdf_url": supabase_public_url(pdf_path),
+            "preview_url": supabase_public_url(preview_store_path) if preview_store_path else "",
+            "auto": True,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        return upsert_supabase_notice(record)
+
+    folder = ROOT / "assets" / "notices" / "Auto" / folder_name
     folder.mkdir(parents=True, exist_ok=True)
-    filename = f"{notice_id:04d}.pdf"
-    dest = folder / filename
+    dest = folder / f"{filename}.pdf"
     shutil.copyfile(source_pdf, dest)
-    preview_path = dest.with_suffix(".png")
-    preview_ok = render_pdf_first_page_to_png(dest, preview_path)
+    local_preview = dest.with_suffix(".png")
+    if preview_bytes:
+        local_preview.write_bytes(preview_bytes)
 
     record = {
         "id": notice_id,
         "key": key,
         "sheet": sheet,
-        "type_isolant": data.get("type_isolant") or "Aucun",
-        "type_calage": data.get("type_calage") or data.get("separations") or data.get("option_calage") or data.get("base") or "Aucun",
+        "type_isolant": isolant,
+        "type_calage": calage,
         "title": title or f"Notice technique - {sheet}",
         "pdf": str(dest.relative_to(ROOT)).replace("\\", "/"),
-        "preview": str(preview_path.relative_to(ROOT)).replace("\\", "/") if preview_ok else "",
+        "preview": str(local_preview.relative_to(ROOT)).replace("\\", "/") if preview_bytes else "",
         "auto": True,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
     }
@@ -499,7 +744,6 @@ def register_notice(sheet: str, data: dict, title: str, source_pdf: Path) -> dic
     index["notices"] = notices
     save_notices_index(index)
     return record
-
 
 def legacy_notice_for(sheet: str, data: dict):
     """Anciennes notices codées en dur, conservées comme secours."""
