@@ -33,6 +33,11 @@ DATA_DIR = ROOT / "data"
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "5000"))
 
+
+def debug_log(message: str) -> None:
+    """Affiche un diagnostic visible dans les logs Render."""
+    print(f"[ESI-DEVIS] {message}", flush=True)
+
 CLASSIQUES = {
     "Tableaux": ["T1", "T1-T6", "MRT", "T1-T3 MRT", "T à Glissières", "T Séparations mousse"],
     "Objets": ["Objet 1", "Objet 2 à 6", "Tapisserie"],
@@ -397,7 +402,9 @@ def download_url_to_file(url: str, suffix: str = "") -> Path | None:
 
 def upload_bytes_to_supabase(path: str, content: bytes, content_type: str) -> None:
     if not supabase_configured():
+        debug_log("Upload Supabase annulé : configuration manquante")
         raise RuntimeError("Supabase n'est pas configuré.")
+    debug_log(f"Upload Supabase -> {path} ({content_type}, {len(content)} octets)")
     req = Request(
         supabase_object_url(path),
         data=content,
@@ -407,9 +414,14 @@ def upload_bytes_to_supabase(path: str, content: bytes, content_type: str) -> No
     try:
         with urlopen(req, timeout=60) as resp:
             resp.read()
+        debug_log(f"Upload Supabase OK -> {path}")
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
+        debug_log(f"Upload Supabase ERREUR {exc.code} -> {detail}")
         raise RuntimeError(f"Upload Supabase impossible ({exc.code}) : {detail}") from exc
+    except Exception as exc:
+        debug_log(f"Upload Supabase ERREUR inattendue -> {type(exc).__name__}: {exc}")
+        raise
 
 
 def normalize_notice_record(record: dict) -> dict:
@@ -468,6 +480,7 @@ def get_supabase_notice_by_values(sheet: str, isolant: str, calage: str):
 
 
 def upsert_supabase_notice(record: dict) -> dict:
+    debug_log(f"Upsert notice Supabase -> key={record.get('key')} table={SUPABASE_TABLE}")
     url = f"{supabase_url()}/rest/v1/{SUPABASE_TABLE}?on_conflict=notice_key"
     payload = {
         "notice_key": record["key"],
@@ -696,6 +709,7 @@ def register_notice(sheet: str, data: dict, title: str, source_pdf: Path) -> dic
         pass
 
     if supabase_configured():
+        debug_log(f"Association notice via Supabase : sheet={sheet}, key={key}, bucket={SUPABASE_BUCKET}")
         pdf_path = f"{folder_name}/{filename}.pdf"
         preview_store_path = f"{folder_name}/{filename}.png" if preview_bytes else ""
         upload_bytes_to_supabase(pdf_path, pdf_bytes, "application/pdf")
@@ -717,6 +731,7 @@ def register_notice(sheet: str, data: dict, title: str, source_pdf: Path) -> dic
         }
         return upsert_supabase_notice(record)
 
+    debug_log("Association notice via stockage local Render (Supabase non configuré)")
     folder = ROOT / "assets" / "notices" / "Auto" / folder_name
     folder.mkdir(parents=True, exist_ok=True)
     dest = folder / f"{filename}.pdf"
@@ -957,7 +972,7 @@ def generate_internal_fiche_pdf(sheet: str, data: dict, result: dict) -> bytes:
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        return
+        debug_log(f"HTTP {self.address_string()} - {fmt % args}")
 
     def send_json(self, payload, status=200):
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -995,6 +1010,10 @@ class Handler(BaseHTTPRequestHandler):
                 "deployment": {
                     "render": True,
                     "supabase_configured": supabase_configured(),
+                    "supabase_url_present": bool(os.getenv("SUPABASE_URL")),
+                    "supabase_service_key_present": bool(os.getenv("SUPABASE_SERVICE_ROLE_KEY")),
+                    "supabase_bucket": SUPABASE_BUCKET,
+                    "supabase_table": SUPABASE_TABLE,
                 },
                 "options": {
                     "T1": options_t1(),
@@ -1035,6 +1054,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 return self.send_json({"ok": False, "error": str(exc)}, status=500)
         if parsed.path == "/api/notice/associate":
+            debug_log(f"POST /api/notice/associate - supabase_configured={supabase_configured()} url_present={bool(os.getenv('SUPABASE_URL'))} service_key_present={bool(os.getenv('SUPABASE_SERVICE_ROLE_KEY'))}")
             try:
                 length = int(self.headers.get("Content-Length", "0") or 0)
                 body = self.rfile.read(length) if length else b""
@@ -1045,6 +1065,7 @@ class Handler(BaseHTTPRequestHandler):
                 title = fields.get("title", "")
                 data = json.loads(data_raw or "{}")
                 file_item = files.get("pdf")
+                debug_log(f"Notice reçue : sheet={sheet}, title={title}, file={file_item.get('filename') if file_item else None}, size={len(file_item.get('content') or b'') if file_item else 0}")
 
                 if not sheet:
                     return self.send_json({"ok": False, "error": "Type de caisse manquant."}, status=400)
@@ -1065,8 +1086,10 @@ class Handler(BaseHTTPRequestHandler):
                         tmp_path.unlink()
                     except Exception:
                         pass
+                debug_log(f"Notice associée OK : {record}")
                 return self.send_json({"ok": True, "notice": notice_record_to_api(record)})
             except Exception as exc:
+                debug_log(f"ERREUR association notice : {type(exc).__name__}: {exc}")
                 return self.send_json({"ok": False, "error": str(exc)}, status=500)
         if parsed.path == "/api/fiche-pdf":
             length = int(self.headers.get("Content-Length", "0") or 0)
