@@ -509,6 +509,37 @@ def upsert_supabase_notice(record: dict) -> dict:
     return normalize_notice_record(payload)
 
 
+def delete_notice_record(identifier: dict) -> bool:
+    """Supprime uniquement l'association de notice.
+    Les fichiers PDF/PNG restent dans Supabase Storage pour éviter toute suppression accidentelle.
+    """
+    key = str(identifier.get("key") or identifier.get("notice_key") or "").strip()
+    notice_id = identifier.get("id")
+
+    if supabase_configured():
+        if key:
+            url = f"{supabase_url()}/rest/v1/{SUPABASE_TABLE}?notice_key=eq.{quote(key, safe='')}"
+        elif notice_id not in (None, ""):
+            url = f"{supabase_url()}/rest/v1/{SUPABASE_TABLE}?id=eq.{quote(str(notice_id), safe='')}"
+        else:
+            raise ValueError("Identifiant de notice manquant.")
+        debug_log(f"Suppression association notice Supabase -> key={key or '-'} id={notice_id or '-'}")
+        http_json(url, method="DELETE", headers=supabase_headers({"Prefer": "return=minimal", "Accept": "application/json"}))
+        return True
+
+    index = load_notices_index()
+    before = len(index.get("notices", []))
+    notices = []
+    for record in index.get("notices", []):
+        same_key = key and (record.get("key") == key or record.get("notice_key") == key)
+        same_id = notice_id not in (None, "") and str(record.get("id")) == str(notice_id)
+        if not (same_key or same_id):
+            notices.append(record)
+    index["notices"] = notices
+    save_notices_index(index)
+    return len(notices) < before
+
+
 def load_notices_index() -> dict:
     if supabase_configured():
         try:
@@ -1090,6 +1121,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, "notice": notice_record_to_api(record)})
             except Exception as exc:
                 debug_log(f"ERREUR association notice : {type(exc).__name__}: {exc}")
+                return self.send_json({"ok": False, "error": str(exc)}, status=500)
+        if parsed.path == "/api/notice/delete":
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                payload = json.loads(raw.decode("utf-8") or "{}")
+                deleted = delete_notice_record(payload)
+                return self.send_json({"ok": True, "deleted": deleted})
+            except Exception as exc:
+                debug_log(f"ERREUR suppression notice : {type(exc).__name__}: {exc}")
                 return self.send_json({"ok": False, "error": str(exc)}, status=500)
         if parsed.path == "/api/fiche-pdf":
             length = int(self.headers.get("Content-Length", "0") or 0)
