@@ -994,7 +994,7 @@ class Handler(BaseHTTPRequestHandler):
                 "notices_count": len(load_notices_index().get("notices", [])),
                 "deployment": {
                     "render": True,
-                    "supabase_configured": bool(os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_ANON_KEY")),
+                    "supabase_configured": supabase_configured(),
                 },
                 "options": {
                     "T1": options_t1(),
