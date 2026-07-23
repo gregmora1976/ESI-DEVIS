@@ -158,9 +158,16 @@ def calculate_sheet(sheet: str, data: dict):
             skis=data.get("skis") or None,
             epaisseur_mousse=data.get("epaisseur_mousse") or None,
             cuvette_au_dessus=data.get("cuvette_au_dessus") or None,
-            responsable_dossier=data.get("responsable_dossier") or None,
+            # La feuille Excel annule tous les totaux lorsque F10 est vide.
+            # On reprend donc le champ "Demandeur" de l'interface et, s'il est vide,
+            # on utilise un marqueur interne afin que le prix soit tout de même calculé.
+            responsable_dossier=(
+                data.get("responsable_dossier")
+                or data.get("demandeur")
+                or "Calcul"
+            ),
             client=data.get("client") or None,
-            delai=data.get("delai") or None,
+            delai=data.get("delai") or data.get("dossier") or None,
             tableaux=tableaux,
         )
         return calculer_t_glissieres(inputs)
