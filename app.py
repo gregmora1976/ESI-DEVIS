@@ -1064,10 +1064,72 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def send_index_with_esi_theme(self):
+        """Sert index.html avec un thème bleu ESI appliqué à tous les champs."""
+        path = ROOT / "index.html"
+        if not path.exists() or not path.is_file():
+            self.send_error(404)
+            return
+
+        html = path.read_text(encoding="utf-8")
+        esi_fields_css = r"""
+<style id="esi-fields-theme">
+  /* Champs de saisie : bleu clair ESI Tickets */
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]),
+  select,
+  textarea {
+    background-color: #e8f4fd !important;
+    border-color: #cfe3f3 !important;
+    color: #0f172a !important;
+  }
+
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):hover,
+  select:hover,
+  textarea:hover {
+    border-color: #8fc8ef !important;
+  }
+
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):focus,
+  select:focus,
+  textarea:focus {
+    background-color: #e0f2fe !important;
+    border-color: #0284c7 !important;
+    outline: none !important;
+    box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.14) !important;
+  }
+
+  input::placeholder,
+  textarea::placeholder {
+    color: #64748b !important;
+    opacity: 1;
+  }
+
+  input:disabled,
+  select:disabled,
+  textarea:disabled,
+  input[readonly],
+  textarea[readonly] {
+    background-color: #dbeafe !important;
+  }
+</style>
+"""
+
+        if "</head>" in html:
+            html = html.replace("</head>", esi_fields_css + "\n</head>", 1)
+        else:
+            html = esi_fields_css + html
+
+        data = html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path in ("/", "/index.html"):
-            return self.send_file(ROOT / "index.html")
+            return self.send_index_with_esi_theme()
         if parsed.path in ("/health", "/api/health"):
             return self.send_json({"ok": True, "service": "matrice-chiffrage-esi"})
         if parsed.path == "/api/config":
