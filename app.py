@@ -22,7 +22,7 @@ from matrice_caisses.t_glissieres import TGlissieresInputs, TableauGlissiere, ca
 from matrice_caisses.t_separations_mousse import TSeparationsMousseInputs, OeuvreSeparationMousse, calculer_t_separations_mousse, options_t_separations_mousse
 from matrice_caisses.objet1 import Objet1Inputs, calculer_objet1, options_objet1
 from matrice_caisses.objet2a6 import Objet2A6Inputs, Objet2A6Item, calculer_objet2a6, options_objet2a6
-from matrice_caisses.caisse_deco import calculer_caisse_deco, options_caisse_deco, load_caisse_deco_prices, save_caisse_deco_prices
+from matrice_caisses.caisse_deco import CaisseDecoInputs, calculer_caisse_deco, options_caisse_deco, DEFAULT_PRICES
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -34,6 +34,39 @@ ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "5000"))
+
+
+def load_caisse_deco_prices() -> dict:
+    """Charge les tarifs Caisse déco depuis data/caisse_deco_prices.json."""
+    path = DATA_DIR / "caisse_deco_prices.json"
+    prices = dict(DEFAULT_PRICES)
+    try:
+        if path.exists():
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(saved, dict):
+                for key in prices:
+                    if key in saved:
+                        prices[key] = float(str(saved[key]).replace(",", "."))
+    except Exception:
+        pass
+    return prices
+
+
+def save_caisse_deco_prices(values: dict) -> dict:
+    """Enregistre les tarifs Caisse déco."""
+    prices = load_caisse_deco_prices()
+    for key in prices:
+        if key in (values or {}):
+            try:
+                prices[key] = float(str(values[key]).replace(",", "."))
+            except Exception:
+                pass
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    (DATA_DIR / "caisse_deco_prices.json").write_text(
+        json.dumps(prices, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return prices
 
 
 def debug_log(message: str) -> None:
@@ -73,7 +106,21 @@ def fmt(value):
 
 def calculate_sheet(sheet: str, data: dict):
     if sheet == "Caisse déco":
-        return calculer_caisse_deco(data)
+        inputs = CaisseDecoInputs(
+            longueur_cm=as_float(data.get("longueur")),
+            largeur_cm=as_float(data.get("largeur")),
+            hauteur_cm=as_float(data.get("hauteur")),
+            type_caisse=data.get("type_caisse") or "PLEINE CP TYPE 16",
+            numero_dossier=data.get("numero_dossier") or None,
+            numero_colis=data.get("numero_colis") or None,
+            client=data.get("client") or None,
+            charge_projet=data.get("charge_projet") or None,
+            observations=data.get("observations") or None,
+        )
+        return calculer_caisse_deco(
+            inputs,
+            prices=data.get("prices") or load_caisse_deco_prices(),
+        )
     if sheet == "T1":
         inputs = T1Inputs(
             longueur_cm=as_float(data.get("longueur_cm")),
@@ -1142,7 +1189,7 @@ class Handler(BaseHTTPRequestHandler):
                 "classiques": CLASSIQUES,
                 "migres": sorted(MIGRES),
                 "parametres_matiere": load_parametres_matiere(),
-                "caisse_deco": {"types": options_caisse_deco().get("types", []), "prices": load_caisse_deco_prices()},
+                "caisse_deco": {"types": options_caisse_deco().get("type_caisse", []), "prices": load_caisse_deco_prices()},
                 "notices_count": len(load_notices_index().get("notices", [])),
                 "deployment": {
                     "render": True,
