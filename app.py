@@ -43,6 +43,7 @@ CLASSIQUES = {
     "Tableaux": ["T1", "T1-T6", "MRT", "T1-T3 MRT", "T à Glissières", "T Séparations mousse"],
     "Objets": ["Objet 1", "Objet 2 à 6", "Tapisserie"],
     "Caissons / Wrapp": ["Wrapp"],
+    "Caisse déco": ["Caisse déco"],
 }
 MIGRES = {"T1", "T1-T6", "MRT", "T1-T3 MRT", "T à Glissières", "T Séparations mousse", "Objet 1", "Objet 2 à 6"}
 
