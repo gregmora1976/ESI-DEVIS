@@ -22,6 +22,7 @@ from matrice_caisses.t_glissieres import TGlissieresInputs, TableauGlissiere, ca
 from matrice_caisses.t_separations_mousse import TSeparationsMousseInputs, OeuvreSeparationMousse, calculer_t_separations_mousse, options_t_separations_mousse
 from matrice_caisses.objet1 import Objet1Inputs, calculer_objet1, options_objet1
 from matrice_caisses.objet2a6 import Objet2A6Inputs, Objet2A6Item, calculer_objet2a6, options_objet2a6
+from matrice_caisses.caisse_deco import calculer_caisse_deco, options_caisse_deco, load_caisse_deco_prices, save_caisse_deco_prices
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -45,7 +46,7 @@ CLASSIQUES = {
     "Caissons / Wrapp": ["Wrapp"],
     "Caisse déco": ["Caisse déco"],
 }
-MIGRES = {"T1", "T1-T6", "MRT", "T1-T3 MRT", "T à Glissières", "T Séparations mousse", "Objet 1", "Objet 2 à 6"}
+MIGRES = {"T1", "T1-T6", "MRT", "T1-T3 MRT", "T à Glissières", "T Séparations mousse", "Objet 1", "Objet 2 à 6", "Caisse déco"}
 
 
 def load_onglets():
@@ -71,6 +72,8 @@ def fmt(value):
 
 
 def calculate_sheet(sheet: str, data: dict):
+    if sheet == "Caisse déco":
+        return calculer_caisse_deco(data)
     if sheet == "T1":
         inputs = T1Inputs(
             longueur_cm=as_float(data.get("longueur_cm")),
@@ -1139,6 +1142,7 @@ class Handler(BaseHTTPRequestHandler):
                 "classiques": CLASSIQUES,
                 "migres": sorted(MIGRES),
                 "parametres_matiere": load_parametres_matiere(),
+                "caisse_deco": {"types": options_caisse_deco().get("types", []), "prices": load_caisse_deco_prices()},
                 "notices_count": len(load_notices_index().get("notices", [])),
                 "deployment": {
                     "render": True,
@@ -1174,6 +1178,15 @@ class Handler(BaseHTTPRequestHandler):
                 data = json.loads(raw.decode("utf-8") or "{}")
                 result = enrich_result_with_cession(calculate_sheet(sheet, data))
                 return self.send_json({"ok": True, "sheet": sheet, "result": {k: fmt(v) for k, v in result.items()}})
+            except Exception as exc:
+                return self.send_json({"ok": False, "error": str(exc)}, status=500)
+        if parsed.path == "/api/caisse-deco/prices":
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                payload = json.loads(raw.decode("utf-8") or "{}")
+                prices = save_caisse_deco_prices(payload)
+                return self.send_json({"ok": True, "prices": prices})
             except Exception as exc:
                 return self.send_json({"ok": False, "error": str(exc)}, status=500)
         if parsed.path == "/api/notice/find":
