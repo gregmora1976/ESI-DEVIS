@@ -6,7 +6,7 @@
 <section class="panel" id="login"><h2>Accès administrateur</h2><p>Renseigner le code défini dans la variable Render <code>ESI_DEVIS_ADMIN_TOKEN</code>.</p><div class="field"><label for="token">Code administrateur</label><input type="password" id="token" autocomplete="off" placeholder="Code administrateur"></div><div style="margin-top:18px"><button class="btn" id="connect">Ouvrir l'administration</button></div><div id="loginStatus" class="status"></div></section>
 <div id="workspace"><section class="panel"><h2>1. Marge de cession générale</h2><div class="grid"><div class="field"><label for="margin">Marge de cession (%)</label><input id="margin" type="number" min="0" max="1000" step="0.01"></div></div><p class="small">Appliquée au prix d'achat calculé par les modules. La valeur initiale est 30 %. Les marges intégrées aux anciennes formules Excel ne sont pas modifiées.</p></section>
 <section class="panel"><h2>2. Caisse déco — tarifs et coefficients</h2><div class="grid" id="deco"></div></section>
-<section class="panel"><h2>3. Prix matières — ancienne matrice Excel</h2><p>Valeurs numériques de la feuille « Prix Matiere » (hors cellules contenant des formules). Les libellés sont repris des cellules voisines lorsque disponibles.</p><div class="actions"><input class="search" id="search" placeholder="Rechercher une matière, une cellule…"><span id="count" class="muted"></span></div><div style="height:14px"></div><div class="table-scroll"><table><thead><tr><th>Libellé / matière</th><th>Cellule Excel</th><th>Valeur d'origine</th><th>Nouvelle valeur</th></tr></thead><tbody id="rows"></tbody></table></div><p class="small">Une valeur identique à celle d'origine n'ajoute aucun remplacement. Les formules restent intactes.</p></section>
+<section class="panel"><h2>3. Prix matières — ancienne matrice Excel</h2><p>Seules les matières disposant d’un libellé sont affichées. Les cellules techniques restent inchangées.</p><div class="actions"><input class="search" id="search" placeholder="Rechercher une matière…"><span id="count" class="muted"></span></div><div style="height:14px"></div><div class="table-scroll"><table><thead><tr><th>Matière</th><th>Valeur d'origine</th><th>Nouvelle valeur</th></tr></thead><tbody id="rows"></tbody></table></div><p class="small">Une valeur identique à celle d'origine n'ajoute aucun remplacement. Les formules restent intactes.</p></section>
 <div class="sticky-actions"><span id="storage" class="small"></span><button class="btn secondary" id="reset">Rétablir les valeurs d'origine à l'écran</button><button class="btn" id="save">ENREGISTRER</button></div><div id="saveStatus" class="status"></div></div></main>
 <script>
 let token='',config=null;
@@ -15,7 +15,29 @@ const decoLabels={cp_m2:'Contreplaqué (€/m²)',barres_ml:'Barres (€/ml)',ch
 function showStatus(id,message,error=false){const e=$(id);e.textContent=message;e.className='status show '+(error?'error':'ok');}
 async function api(path,method='GET',body=null){const r=await fetch(path,{method,headers:{Authorization:'Bearer '+token,...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||'Erreur serveur');return j;}
 function render(){ $('login').style.display='none';$('workspace').style.display='block';$('margin').value=config.marge_cession_percent;$('storage').textContent=config.storage==='supabase'?'Sauvegarde Supabase':'Sauvegarde locale (non persistante sur Render)';$('deco').innerHTML=Object.entries(decoLabels).map(([k,label])=>`<div class="field"><label for="d_${k}">${label}</label><input id="d_${k}" type="number" min="0" step="0.01" value="${Number(config.deco_prices[k]||0)}"></div>`).join('');drawRows();}
-function drawRows(){const q=$('search').value.toLowerCase();const matching=(config.cells||[]).filter(x=>(x.label+' '+x.key+' '+x.cell).toLowerCase().includes(q));$('count').textContent=matching.length+' paramètres affichés sur '+config.cells.length;const body=$('rows');body.replaceChildren();for(const cell of matching){const tr=document.createElement('tr');let td=document.createElement('td');td.textContent=cell.label;tr.appendChild(td);td=document.createElement('td');td.innerHTML='<span class="tag"></span>';td.firstChild.textContent=cell.cell;tr.appendChild(td);td=document.createElement('td');td.textContent=String(cell.value);tr.appendChild(td);td=document.createElement('td');const inp=document.createElement('input');inp.type='number';inp.step='any';inp.min='0';inp.dataset.key=cell.key;inp.value=cell.current;inp.addEventListener('input',()=>{cell.current=inp.value});td.appendChild(inp);tr.appendChild(td);body.appendChild(tr);}}
+function isNamedMaterial(cell){
+  const label=String(cell.label||'').trim();
+  // Les lignes de repli "Cellule A3" ne sont pas des matières nommées.
+  if(!label || /^cellule\s+[A-Z]+[0-9]+$/i.test(label)) return false;
+  // Exclure les libellés constitués seulement de chiffres ou de ponctuation.
+  return /[A-Za-zÀ-ÿ]/.test(label);
+}
+function drawRows(){
+  const named=(config.cells||[]).filter(isNamedMaterial);
+  const q=$('search').value.trim().toLocaleLowerCase('fr');
+  const matching=named.filter(x=>String(x.label).toLocaleLowerCase('fr').includes(q));
+  $('count').textContent=matching.length+' matières affichées sur '+named.length;
+  const body=$('rows');body.replaceChildren();
+  for(const cell of matching){
+    const tr=document.createElement('tr');
+    let td=document.createElement('td');td.textContent=cell.label;tr.appendChild(td);
+    td=document.createElement('td');td.textContent=String(cell.value);tr.appendChild(td);
+    td=document.createElement('td');
+    const inp=document.createElement('input');inp.type='number';inp.step='any';inp.min='0';inp.dataset.key=cell.key;inp.value=cell.current;
+    inp.addEventListener('input',()=>{cell.current=inp.value});td.appendChild(inp);tr.appendChild(td);body.appendChild(tr);
+  }
+  if(!matching.length){const tr=document.createElement('tr');const td=document.createElement('td');td.colSpan=3;td.className='muted';td.textContent='Aucune matière nommée trouvée.';tr.appendChild(td);body.appendChild(tr);}
+}
 $('connect').onclick=async()=>{token=$('token').value;try{config=await api('/api/admin/config');render();}catch(e){token='';showStatus('loginStatus',e.message,true);}};
 $('token').addEventListener('keydown',e=>{if(e.key==='Enter')$('connect').click()});$('search').addEventListener('input',drawRows);
 $('reset').onclick=()=>{if(!confirm('Rétablir à l’écran les valeurs d’origine ? Vous devrez ensuite enregistrer.'))return;for(const x of config.cells)x.current=x.value;$('margin').value=30;for(const [k] of Object.entries(decoLabels))$('d_'+k).value=config.deco_prices[k];drawRows();};
