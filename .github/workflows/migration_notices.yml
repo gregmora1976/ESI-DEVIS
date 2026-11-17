@@ -1,0 +1,23 @@
+name: Migrer notices ESI-DEVIS vers Supabase PRO
+
+on:
+  workflow_dispatch:
+
+jobs:
+  migrer-notices:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Recuperer les fichiers GitHub
+        uses: actions/checkout@v4
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Installer boto3
+        run: python -m pip install boto3
+      - name: Copier et verifier les notices
+        env:
+          ESI_PRO_S3_ACCESS_KEY_ID: ${{ secrets.ESI_PRO_S3_ACCESS_KEY_ID }}
+          ESI_PRO_S3_SECRET_ACCESS_KEY: ${{ secrets.ESI_PRO_S3_SECRET_ACCESS_KEY }}
+        run: python migration_storage_esi_devis.py
