@@ -1161,49 +1161,72 @@ def admin_workbook():
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def admin_editable_cells():
-    """Return all numeric constants from the original Excel 'Prix Matiere' sheet.
-    Never expose formula cells for editing.
+def _admin_numeric_price_formula(formula):
+    """Evaluate only simple numeric expressions used in column B of Prix Matiere.
+
+    This reads a displayed base price; it never evaluates arbitrary Python or
+    changes any spreadsheet formula. Cell references are deliberately rejected.
     """
-    wb = admin_workbook()
-    values = wb.get("values") or {}
-    formulas = wb.get("formulas") or {}
-    entries = []
+    import ast
+    import operator
+    operators = {ast.Add:operator.add, ast.Sub:operator.sub,
+                 ast.Mult:operator.mul, ast.Div:operator.truediv,
+                 ast.USub:operator.neg, ast.UAdd:operator.pos}
+    def evaluate(node):
+        if isinstance(node,ast.Expression):
+            return evaluate(node.body)
+        if isinstance(node,ast.Constant) and type(node.value) in (int,float):
+            return float(node.value)
+        if isinstance(node,ast.BinOp) and type(node.op) in operators:
+            return operators[type(node.op)](evaluate(node.left),evaluate(node.right))
+        if isinstance(node,ast.UnaryOp) and type(node.op) in operators:
+            return operators[type(node.op)](evaluate(node.operand))
+        raise ValueError('Formule de prix non prise en charge')
+    try:
+        expr=str(formula).strip().lstrip('=')
+        result=evaluate(ast.parse(expr,mode='eval'))
+        return result if math.isfinite(result) else None
+    except (ValueError,SyntaxError,ZeroDivisionError,OverflowError,TypeError):
+        return None
+
+
+def admin_editable_cells():
+    """Only original column B prices with a material name in column A.
+
+    Columns C onwards are calculation parameters, not editable material prices.
+    Even when a price in column B is a numeric Excel formula, its calculated
+    value is shown and may be explicitly overridden at runtime.
+    """
     import re
-    for key, raw in values.items():
-        if "!" not in key or key in formulas:
-            continue
-        sheet, cell = key.rsplit("!", 1)
-        norm = unicodedata.normalize("NFKD", sheet).encode("ascii", "ignore").decode("ascii").lower()
-        if "prix" not in norm or "matiere" not in norm:
-            continue
-        value = _number(raw)
-        if value is None:
-            continue
-        m = re.fullmatch(r"([A-Z]+)([0-9]+)", cell)
-        if not m:
-            continue
-        col, row = m.group(1), int(m.group(2))
-        # Read nearby descriptive cells without relying on a hardcoded Excel layout.
-        def col_index(c):
-            n = 0
-            for t in c: n = n*26 + ord(t)-64
-            return n
-        def col_letters(n):
-            s = ""
-            while n: n,r=divmod(n-1,26); s=chr(65+r)+s
-            return s
-        labels = []
-        for c in range(max(1, col_index(col)-4), col_index(col)):
-            candidate = values.get(f"{sheet}!{col_letters(c)}{row}")
-            if isinstance(candidate, str) and candidate.strip():
-                labels.append(candidate.strip())
-        label = " / ".join(labels[-2:]) if labels else f"Cellule {cell}"
-        entries.append({"key":key, "label":label[:140], "value":value, "sheet":sheet, "cell":cell})
-    def sort_key(d):
-        m=re.fullmatch(r"([A-Z]+)([0-9]+)",d["cell"])
-        return (int(m.group(2)),m.group(1))
-    return sorted(entries,key=sort_key)
+    wb=admin_workbook()
+    values=wb.get('values') or {}
+    formulas=wb.get('formulas') or {}
+    entries=[]
+    sheets=set()
+    for key in set(values) | set(formulas):
+        if '!' not in key: continue
+        sheet,cell=key.rsplit('!',1)
+        norm=unicodedata.normalize('NFKD',sheet).encode('ascii','ignore').decode('ascii').lower()
+        if 'prix' in norm and 'matiere' in norm:
+            sheets.add(sheet)
+    for sheet in sheets:
+        for key in set(values) | set(formulas):
+            if not key.startswith(sheet+'!B'): continue
+            cell=key.rsplit('!',1)[1]
+            match=re.fullmatch(r'B([0-9]+)',cell)
+            if not match or int(match.group(1))<4: continue
+            row=int(match.group(1))
+            label=values.get(f'{sheet}!A{row}')
+            if not isinstance(label,str) or not label.strip(): continue
+            if label.strip().casefold() in ('frais généraux', 'marge'): continue
+            raw=values.get(key)
+            value=_number(raw)
+            if key in formulas:
+                value=_admin_numeric_price_formula(formulas[key])
+            if value is None: continue
+            entries.append({'key':key,'label':label.strip(),'value':value,
+                            'sheet':sheet,'cell':cell})
+    return sorted(entries,key=lambda row:int(row['cell'][1:]))
 
 
 def effective_admin_cells():
@@ -1218,7 +1241,10 @@ def effective_admin_cells():
 
 def apply_admin_workbook_overrides(calc):
     for key,value in effective_admin_cells().items():
-        if key in calc.values and key not in calc.formulas:
+        if key in calc.values or key in calc.formulas:
+            # Override ONLY an explicitly edited price in column B.
+            # The original Excel snapshot and all formulas in columns C+ stay intact.
+            calc.formulas.pop(key, None)
             calc.values[key] = value
     if hasattr(calc,"cache"): calc.cache.clear()
 

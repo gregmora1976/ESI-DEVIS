@@ -6,7 +6,7 @@
 <section class="panel" id="login"><h2>Accès administrateur</h2><p>Renseigner le code défini dans la variable Render <code>ESI_DEVIS_ADMIN_TOKEN</code>.</p><div class="field"><label for="token">Code administrateur</label><input type="password" id="token" autocomplete="off" placeholder="Code administrateur"></div><div style="margin-top:18px"><button class="btn" id="connect">Ouvrir l'administration</button></div><div id="loginStatus" class="status"></div></section>
 <div id="workspace"><section class="panel"><h2>1. Marge de cession générale</h2><div class="grid"><div class="field"><label for="margin">Marge de cession (%)</label><input id="margin" type="number" min="0" max="1000" step="0.01"></div></div><p class="small">Appliquée au prix d'achat calculé par les modules. La valeur initiale est 30 %. Les marges intégrées aux anciennes formules Excel ne sont pas modifiées.</p></section>
 <section class="panel"><h2>2. Caisse déco — tarifs et coefficients</h2><div class="grid" id="deco"></div></section>
-<section class="panel"><h2>3. Prix matières — ancienne matrice Excel</h2><p>Seules les matières disposant d’un libellé sont affichées. Les cellules techniques restent inchangées.</p><div class="actions"><input class="search" id="search" placeholder="Rechercher une matière…"><span id="count" class="muted"></span></div><div style="height:14px"></div><div class="table-scroll"><table><thead><tr><th>Matière</th><th>Valeur d'origine</th><th>Nouvelle valeur</th></tr></thead><tbody id="rows"></tbody></table></div><p class="small">Une valeur identique à celle d'origine n'ajoute aucun remplacement. Les formules restent intactes.</p></section>
+<section class="panel"><h2>3. Prix matières — ancienne matrice Excel</h2><p>Seuls les prix de la colonne B (matières nommées en colonne A) peuvent être modifiés. Les colonnes C à I restent réservées aux calculs.</p><div class="actions"><input class="search" id="search" placeholder="Rechercher une matière…"><span id="count" class="muted"></span></div><div style="height:14px"></div><div class="table-scroll"><table><thead><tr><th>Matière</th><th>Valeur d'origine</th><th>Nouvelle valeur</th></tr></thead><tbody id="rows"></tbody></table></div><p class="small">Une valeur identique à celle d'origine n'ajoute aucun remplacement. Les formules restent intactes.</p></section>
 <div class="sticky-actions"><span id="storage" class="small"></span><button class="btn secondary" id="reset">Rétablir les valeurs d'origine à l'écran</button><button class="btn" id="save">ENREGISTRER</button></div><div id="saveStatus" class="status"></div></div></main>
 <script>
 let token='',config=null;
@@ -23,7 +23,7 @@ function isNamedMaterial(cell){
   return /[A-Za-zÀ-ÿ]/.test(label);
 }
 function drawRows(){
-  const named=(config.cells||[]).filter(isNamedMaterial);
+  const named=(config.cells||[]).filter(cell=>/^B[0-9]+$/.test(cell.cell)&&isNamedMaterial(cell));
   const q=$('search').value.trim().toLocaleLowerCase('fr');
   const matching=named.filter(x=>String(x.label).toLocaleLowerCase('fr').includes(q));
   $('count').textContent=matching.length+' matières affichées sur '+named.length;
