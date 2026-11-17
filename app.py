@@ -49,6 +49,9 @@ def load_caisse_deco_prices() -> dict:
                         prices[key] = float(str(saved[key]).replace(",", "."))
     except Exception:
         pass
+    try:
+        prices.update(load_admin_settings().get("deco_prices") or {})
+    except Exception: pass
     return prices
 
 
@@ -364,6 +367,9 @@ def load_parametres_matiere():
 
 def taux_marge_cession():
     params = load_parametres_matiere()
+    try:
+        params.update({"marge_cession_percent":load_admin_settings().get("marge_cession_percent",params.get("marge_cession_percent",30))})
+    except Exception: pass
     value = params.get("marge_cession_percent", 30)
     try:
         return float(str(value).replace(",", ".")) / 100.0
@@ -1091,6 +1097,189 @@ def generate_internal_fiche_pdf(sheet: str, data: dict, result: dict) -> bytes:
     return pdf_bytes
 
 
+
+# --- ADMIN ESI-DEVIS : parameters only, Excel formulas remain untouched ---
+ADMIN_TABLE = "esi_devis_admin_settings"
+ADMIN_ROW = "global"
+ADMIN_PATH = DATA_DIR / "admin_settings.json"
+
+
+def admin_authorized(headers) -> bool:
+    import hmac
+    token = os.getenv("ESI_DEVIS_ADMIN_TOKEN", "")
+    supplied = headers.get("Authorization", "")
+    return bool(token) and hmac.compare_digest(supplied, "Bearer " + token)
+
+
+def _admin_supabase_enabled() -> bool:
+    # A service-role key is necessary for server-side administration.
+    return bool(supabase_url() and os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
+
+
+def admin_storage_headers(extra=None):
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    return {"apikey": key, "Authorization": "Bearer " + key, **(extra or {})}
+
+
+def load_admin_settings():
+    default = {"cells": {}, "marge_cession_percent": 30.0, "deco_prices": {}}
+    if _admin_supabase_enabled():
+        url = f"{supabase_url()}/rest/v1/{ADMIN_TABLE}?id=eq.{ADMIN_ROW}&select=payload"
+        rows = http_json(url, headers=admin_storage_headers())
+        return {**default, **((rows or [{}])[0].get("payload") or {})}
+    if ADMIN_PATH.exists():
+        try:
+            return {**default, **json.loads(ADMIN_PATH.read_text(encoding="utf-8"))}
+        except Exception:
+            pass
+    return default
+
+
+def save_admin_settings(payload):
+    if _admin_supabase_enabled():
+        url = f"{supabase_url()}/rest/v1/{ADMIN_TABLE}?on_conflict=id"
+        http_json(url, method="POST", payload={"id": ADMIN_ROW, "payload": payload},
+                  headers=admin_storage_headers({"Prefer": "resolution=merge-duplicates,return=minimal"}))
+    else:
+        # Local storage is suitable for development, not persistent Render disks.
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        ADMIN_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _number(v):
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, (float, int)) and math.isfinite(v):
+        return float(v)
+    return None
+
+
+def admin_workbook():
+    path = DATA_DIR / "workbook_snapshot.json"
+    if not path.exists():
+        return {"values": {}, "formulas": {}}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def admin_editable_cells():
+    """Return all numeric constants from the original Excel 'Prix Matiere' sheet.
+    Never expose formula cells for editing.
+    """
+    wb = admin_workbook()
+    values = wb.get("values") or {}
+    formulas = wb.get("formulas") or {}
+    entries = []
+    import re
+    for key, raw in values.items():
+        if "!" not in key or key in formulas:
+            continue
+        sheet, cell = key.rsplit("!", 1)
+        norm = unicodedata.normalize("NFKD", sheet).encode("ascii", "ignore").decode("ascii").lower()
+        if "prix" not in norm or "matiere" not in norm:
+            continue
+        value = _number(raw)
+        if value is None:
+            continue
+        m = re.fullmatch(r"([A-Z]+)([0-9]+)", cell)
+        if not m:
+            continue
+        col, row = m.group(1), int(m.group(2))
+        # Read nearby descriptive cells without relying on a hardcoded Excel layout.
+        def col_index(c):
+            n = 0
+            for t in c: n = n*26 + ord(t)-64
+            return n
+        def col_letters(n):
+            s = ""
+            while n: n,r=divmod(n-1,26); s=chr(65+r)+s
+            return s
+        labels = []
+        for c in range(max(1, col_index(col)-4), col_index(col)):
+            candidate = values.get(f"{sheet}!{col_letters(c)}{row}")
+            if isinstance(candidate, str) and candidate.strip():
+                labels.append(candidate.strip())
+        label = " / ".join(labels[-2:]) if labels else f"Cellule {cell}"
+        entries.append({"key":key, "label":label[:140], "value":value, "sheet":sheet, "cell":cell})
+    def sort_key(d):
+        m=re.fullmatch(r"([A-Z]+)([0-9]+)",d["cell"])
+        return (int(m.group(2)),m.group(1))
+    return sorted(entries,key=sort_key)
+
+
+def effective_admin_cells():
+    try:
+        saved = load_admin_settings().get("cells") or {}
+        editable = {row["key"]:row["value"] for row in admin_editable_cells()}
+        return {k:float(v) for k,v in saved.items() if k in editable and _number(v) is not None}
+    except Exception as exc:
+        debug_log(f"Admin settings unavailable: {exc}")
+        return {}
+
+
+def apply_admin_workbook_overrides(calc):
+    for key,value in effective_admin_cells().items():
+        if key in calc.values and key not in calc.formulas:
+            calc.values[key] = value
+    if hasattr(calc,"cache"): calc.cache.clear()
+
+
+def install_admin_excel_hooks():
+    from matrice_caisses import excel_engine, t1
+    for cls in (excel_engine.ExcelSheetCalculator, t1.T1Calculator):
+        if getattr(cls,"_esi_admin_hook",False):
+            continue
+        orig = cls.__init__
+        def wrapped(self,*args,_original=orig,**kwargs):
+            _original(self,*args,**kwargs)
+            apply_admin_workbook_overrides(self)
+        cls.__init__ = wrapped
+        cls._esi_admin_hook=True
+
+install_admin_excel_hooks()
+
+
+def admin_config_payload():
+    saved=load_admin_settings()
+    overrides=saved.get("cells") or {}
+    rows=admin_editable_cells()
+    for row in rows:
+        row["current"] = overrides.get(row["key"], row["value"])
+    return {"cells":rows,"marge_cession_percent":saved.get("marge_cession_percent",30),
+            "deco_prices":{**load_caisse_deco_prices(),**(saved.get("deco_prices") or {})},
+            "storage":"supabase" if _admin_supabase_enabled() else "local"}
+
+
+def admin_validate_save(data):
+    if not isinstance(data,dict): raise ValueError("Données invalides")
+    previous=load_admin_settings()
+    allowed={r["key"] for r in admin_editable_cells()}
+    cells=data.get("cells",{})
+    if not isinstance(cells,dict): raise ValueError("Cellules invalides")
+    if set(cells)-allowed: raise ValueError("Modification de cellule non autorisée")
+    checked={}
+    for k,v in cells.items():
+        try: f=float(str(v).replace(",","."))
+        except Exception: raise ValueError(f"Valeur non numérique : {k}")
+        if not math.isfinite(f) or f<0: raise ValueError(f"Valeur incorrecte : {k}")
+        checked[k]=f
+    margin=data.get("marge_cession_percent",previous.get("marge_cession_percent",30))
+    try: margin=float(str(margin).replace(",","."))
+    except Exception: raise ValueError("Marge non numérique")
+    if not math.isfinite(margin) or not 0<=margin<=1000: raise ValueError("Marge hors limites")
+    allowed_deco=set(DEFAULT_PRICES)
+    deco=data.get("deco_prices",previous.get("deco_prices",{}))
+    if not isinstance(deco,dict) or set(deco)-allowed_deco: raise ValueError("Tarifs déco invalides")
+    clean_deco={}
+    for k,v in deco.items():
+        try: f=float(str(v).replace(",","."))
+        except Exception: raise ValueError(f"Tarif déco non numérique : {k}")
+        if not math.isfinite(f) or f<0: raise ValueError(f"Tarif déco incorrect : {k}")
+        clean_deco[k]=f
+    payload={"cells":checked,"marge_cession_percent":margin,"deco_prices":clean_deco}
+    save_admin_settings(payload)
+    return payload
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         debug_log(f"HTTP {self.address_string()} - {fmt % args}")
@@ -1179,6 +1368,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/admin":
+            if not os.getenv("ESI_DEVIS_ADMIN_TOKEN"):
+                return self.send_json({"ok":False,"error":"Définir ESI_DEVIS_ADMIN_TOKEN dans Render"},503)
+            return self.send_file(ROOT / "admin.html")
+        if parsed.path == "/api/admin/config":
+            if not admin_authorized(self.headers):
+                return self.send_json({"ok":False,"error":"Accès administrateur refusé"},401)
+            try: return self.send_json({"ok":True,**admin_config_payload()})
+            except Exception as exc: return self.send_json({"ok":False,"error":str(exc)},500)
         if parsed.path in ("/", "/index.html"):
             return self.send_index_with_esi_theme()
         if parsed.path in ("/health", "/api/health"):
@@ -1217,6 +1415,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/api/admin/save":
+            if not admin_authorized(self.headers):
+                return self.send_json({"ok":False,"error":"Accès administrateur refusé"},401)
+            try:
+                length=int(self.headers.get("Content-Length","0") or 0)
+                if length>500000: return self.send_json({"ok":False,"error":"Requête trop volumineuse"},413)
+                data=json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+                clean=admin_validate_save(data)
+                return self.send_json({"ok":True,"settings":clean})
+            except ValueError as exc:
+                return self.send_json({"ok":False,"error":str(exc)},400)
+            except Exception as exc:
+                return self.send_json({"ok":False,"error":str(exc)},500)
         if parsed.path.startswith("/api/calculate/"):
             sheet = unquote(parsed.path.split("/api/calculate/", 1)[1])
             length = int(self.headers.get("Content-Length", "0") or 0)
@@ -1228,6 +1439,8 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 return self.send_json({"ok": False, "error": str(exc)}, status=500)
         if parsed.path == "/api/caisse-deco/prices":
+            if not admin_authorized(self.headers):
+                return self.send_json({"ok":False,"error":"Accès administrateur refusé"},401)
             length = int(self.headers.get("Content-Length", "0") or 0)
             raw = self.rfile.read(length) if length else b"{}"
             try:

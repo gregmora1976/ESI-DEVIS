@@ -23,7 +23,7 @@
   <div class="content">
     <div class="card top-actions">
       <div><div class="section-title" style="margin-bottom:6px">Navigation</div><div class="tabs"><button class="tab active" id="btnHome">Accueil classique</button><button class="tab" id="btnExpert">EXPERT - tous les onglets</button></div></div>
-      <div class="actions"><button class="btn secondary" id="btnLibrary">Bibliothèque des notices</button><button class="btn secondary" id="btnRefresh">Réinitialiser</button></div>
+      <div class="actions"><a class="btn dark" href="/admin" style="text-decoration:none">ADMIN</a><button class="btn secondary" id="btnLibrary">Bibliothèque des notices</button><button class="btn secondary" id="btnRefresh">Réinitialiser</button></div>
     </div>
     <div id="home" class="card"><div class="section-title">Types de caisses classiques</div><div class="home-grid" id="homeGrid"></div></div>
     <div id="expert" class="card hidden"><div class="section-title">Mode EXPERT - tous les onglets Excel</div><div class="expert-list" id="expertList"></div></div>
@@ -53,7 +53,7 @@ function decoPricesHtml(prices){
  ${priceField('deco_chevrons_ml','Chevrons €/ml',p.chevrons_ml)}${priceField('deco_consommables','Consommables €',p.consommables)}
  ${priceField('deco_taux_horaire','Main œuvre €/h',p.taux_horaire)}${priceField('deco_heures','Temps h',p.heures)}
  ${priceField('deco_frais_generaux','Frais généraux %',p.frais_generaux)}${priceField('deco_marge','Marge %',p.marge)}
- </div><div style="margin-top:10px"><button class="btn secondary small" type="button" onclick="saveDecoPrices()">Enregistrer les tarifs</button></div>`;
+ </div><div class="muted" style="margin-top:10px">Pour enregistrer les tarifs, utiliser la page ADMIN.</div>`;
 }
 function renderCaisseDeco(){
  const cfg=(state.config&&state.config.caisse_deco)||{};
