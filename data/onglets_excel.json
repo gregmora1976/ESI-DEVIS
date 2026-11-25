@@ -42,12 +42,6 @@
     "categorie": "Caisses Tableaux"
   },
   {
-    "nom": "Tableau Anti Vibratoire",
-    "etat": "hidden",
-    "couleur": "#00B0F0",
-    "categorie": "Caisses Tableaux"
-  },
-  {
     "nom": "T à Glissières",
     "etat": "visible",
     "couleur": "#00B0F0",
@@ -96,12 +90,6 @@
     "categorie": "Caisses Objets"
   },
   {
-    "nom": " Objet Anti Vibratoire",
-    "etat": "visible",
-    "couleur": "#92D050",
-    "categorie": "Caisses Objets"
-  },
-  {
     "nom": "Tapisserie",
     "etat": "visible",
     "couleur": "#92D050",
@@ -132,22 +120,10 @@
     "categorie": "Caissons / Wrapp"
   },
   {
-    "nom": "Wrapp Barré",
-    "etat": "visible",
-    "couleur": "#FFC000",
-    "categorie": "Caissons / Wrapp"
-  },
-  {
     "nom": "Vente de Matière",
     "etat": "visible",
     "couleur": "#FF0000",
     "categorie": "Vente de Matière"
-  },
-  {
-    "nom": "Caisse Garde-Meubles",
-    "etat": "visible",
-    "couleur": "#D9D9D9",
-    "categorie": "Paramètres / Infos"
   },
   {
     "nom": "Prix Matiere",
