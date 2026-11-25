@@ -24,6 +24,8 @@ from matrice_caisses.objet1 import Objet1Inputs, calculer_objet1, options_objet1
 from matrice_caisses.objet2a6 import Objet2A6Inputs, Objet2A6Item, calculer_objet2a6, options_objet2a6
 from matrice_caisses.caisse_deco import CaisseDecoInputs, calculer_caisse_deco, options_caisse_deco, DEFAULT_PRICES
 
+from matrice_caisses import integration_2026 as engine2026
+
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
@@ -78,11 +80,11 @@ def debug_log(message: str) -> None:
 
 CLASSIQUES = {
     "Tableaux": ["T1", "T1-T6", "MRT", "T1-T3 MRT", "T à Glissières", "T Séparations mousse"],
-    "Objets": ["Objet 1", "Objet 2 à 6", "Tapisserie"],
-    "Caissons / Wrapp": ["Wrapp"],
+    "Objets": ["Objet 1", "Objet 2 à 6", "Tapisserie", "Caisse Cuvette", "Claire-Voie", "Palette"],
+    "Caissons / Wrapp": ["Wrapp", "Caisson Tableaux", "1 Caisson Objet", "6 Caissons Objets"],
     "Caisse déco": ["Caisse déco"],
 }
-MIGRES = {"T1", "T1-T6", "MRT", "T1-T3 MRT", "T à Glissières", "T Séparations mousse", "Objet 1", "Objet 2 à 6", "Caisse déco"}
+MIGRES = set(engine2026.OUTPUTS) | {"Caisse déco"}
 
 
 def load_onglets():
@@ -124,6 +126,8 @@ def calculate_sheet(sheet: str, data: dict):
             inputs,
             prices=data.get("prices") or load_caisse_deco_prices(),
         )
+    if sheet in engine2026.NEW:
+        return engine2026.generic(sheet, data, effective_admin_cells(strict=True))
     if sheet == "T1":
         inputs = T1Inputs(
             longueur_cm=as_float(data.get("longueur_cm")),
@@ -139,7 +143,7 @@ def calculate_sheet(sheet: str, data: dict):
             option_calage=data.get("option_calage") or None,
             epaisseur_mousse=data.get("epaisseur_mousse") or None,
         )
-        return calculer_t1(inputs)
+        return engine2026.legacy(sheet, inputs, data, effective_admin_cells(strict=True))
     if sheet == "T1-T6":
         oeuvres = []
         for item in data.get("oeuvres", []):
@@ -159,7 +163,7 @@ def calculate_sheet(sheet: str, data: dict):
             option_calage=data.get("option_calage") or None,
             oeuvres=oeuvres,
         )
-        return calculer_t1_t6(inputs)
+        return engine2026.legacy(sheet, inputs, data, effective_admin_cells(strict=True))
 
     if sheet == "T1-T3 MRT":
         mrts = []
@@ -188,7 +192,7 @@ def calculate_sheet(sheet: str, data: dict):
             delai=data.get("delai") or None,
             mrts=mrts,
         )
-        return calculer_t1_t3_mrt(inputs)
+        return engine2026.legacy(sheet, inputs, data, effective_admin_cells(strict=True))
 
     if sheet == "T à Glissières":
         tableaux = []
@@ -224,7 +228,7 @@ def calculate_sheet(sheet: str, data: dict):
             delai=data.get("delai") or data.get("dossier") or None,
             tableaux=tableaux,
         )
-        return calculer_t_glissieres(inputs)
+        return engine2026.legacy(sheet, inputs, data, effective_admin_cells(strict=True))
 
     if sheet == "T Séparations mousse":
         rang1 = []
@@ -257,7 +261,7 @@ def calculate_sheet(sheet: str, data: dict):
             rang1=rang1,
             rang2=rang2,
         )
-        return calculer_t_separations_mousse(inputs)
+        return engine2026.legacy(sheet, inputs, data, effective_admin_cells(strict=True))
 
     if sheet == "Objet 1":
         inputs = Objet1Inputs(
@@ -282,7 +286,7 @@ def calculate_sheet(sheet: str, data: dict):
             responsable_dossier=data.get("responsable_dossier") or None,
             client=data.get("client") or None,
         )
-        return calculer_objet1(inputs)
+        return engine2026.legacy(sheet, inputs, data, effective_admin_cells(strict=True))
     if sheet == "Objet 2 à 6":
         objets = []
         for item in data.get("objets", []):
@@ -311,7 +315,7 @@ def calculate_sheet(sheet: str, data: dict):
             delai=data.get("delai") or data.get("dossier") or None,
             objets=objets,
         )
-        return calculer_objet2a6(inputs)
+        return engine2026.legacy(sheet, inputs, data, effective_admin_cells(strict=True))
 
     if sheet == "MRT":
         inputs = MRTInputs(
@@ -329,7 +333,7 @@ def calculate_sheet(sheet: str, data: dict):
             client=data.get("client") or None,
             categorie=data.get("categorie") or None,
         )
-        return calculer_mrt(inputs)
+        return engine2026.legacy(sheet, inputs, data, effective_admin_cells(strict=True))
     raise ValueError("Ce type de caisse n'est pas encore migré.")
 
 
@@ -343,8 +347,8 @@ def ceil_text(value):
 
 
 def euro_text(value):
-    txt = ceil_text(value)
-    return "-" if txt == "-" else f"{txt} €"
+    if value in (None, ""): return "-"
+    return f"{float(value):,.2f}".replace(",", " ").replace(".", ",") + " €"
 
 
 def num_text(value, suffix=""):
@@ -1155,10 +1159,14 @@ def _number(v):
 
 
 def admin_workbook():
-    path = DATA_DIR / "workbook_snapshot.json"
-    if not path.exists():
-        return {"values": {}, "formulas": {}}
-    return json.loads(path.read_text(encoding="utf-8"))
+    sheet = engine2026.workbook()["Prix Matiere"]
+    values, formulas = {}, {}
+    for row in sheet.iter_rows(min_col=1,max_col=2):
+        for cell in row:
+            key = f"Prix Matiere!{cell.coordinate}"
+            if cell.data_type == "f": formulas[key] = cell.value
+            elif cell.value is not None: values[key] = cell.value
+    return {"values":values,"formulas":formulas}
 
 
 def _admin_numeric_price_formula(formula):
@@ -1229,13 +1237,14 @@ def admin_editable_cells():
     return sorted(entries,key=lambda row:int(row['cell'][1:]))
 
 
-def effective_admin_cells():
+def effective_admin_cells(strict=False):
     try:
         saved = load_admin_settings().get("cells") or {}
         editable = {row["key"]:row["value"] for row in admin_editable_cells()}
         return {k:float(v) for k,v in saved.items() if k in editable and _number(v) is not None}
     except Exception as exc:
         debug_log(f"Admin settings unavailable: {exc}")
+        if strict: raise ValueError("Tarifs ADMIN indisponibles : calcul interrompu.") from exc
         return {}
 
 
@@ -1423,21 +1432,28 @@ class Handler(BaseHTTPRequestHandler):
                     "supabase_bucket": SUPABASE_BUCKET,
                     "supabase_table": SUPABASE_TABLE,
                 },
+                "formulaires_2026": engine2026.schemas(),
                 "options": {
                     "T1": options_t1(),
-                    "T1-T6": options_t1_t6(),
+                    "T1-T6": {**options_t1_t6(), "type_calage": ["Aucun", "Bandes de mousse", "Bandes de mousse fond plein", "Mousse à ras", "Mousse à ras inversée", "Sous verre / bandes de mousse", "Sous verre 2 faces"]},
                     "MRT": options_mrt(),
-                    "T1-T3 MRT": options_t1_t3_mrt(),
-                    "T à Glissières": options_t_glissieres(),
-                    "T Séparations mousse": options_t_separations_mousse(),
+                    "T1-T3 MRT": {**options_t1_t3_mrt(), "type_calage": ["Aucun", "Stratocell 30 mm ", "Stratocell 50 mm"]},
+                    "T à Glissières": {**options_t_glissieres(), "epaisseur_mousse": ["Mousse 30 mm", "Mousse 50 mm"]},
+                    "T Séparations mousse": {**options_t_separations_mousse(), "separations": ["Carton", "Carton + mousse PU 20", "Carton Triple", "PU 30", "PU 50"]},
                     "Objet 1": options_objet1(),
                     "Objet 2 à 6": options_objet2a6(),
                 },
             })
         if parsed.path == "/api/notices":
             return self.send_json(load_notices_index())
-        safe = parsed.path.lstrip("/").replace("..", "")
-        return self.send_file(ROOT / safe)
+        # Only the existing public logo and technical notices are served.
+        # Calculation workbooks, snapshots, Python and admin settings remain private.
+        safe = unquote(parsed.path).lstrip("/")
+        target = (ROOT / safe).resolve()
+        assets = (ROOT / "assets" / "notices").resolve()
+        if target == (ROOT / "logo.png").resolve() or (target.is_relative_to(assets) and target.suffix.lower() in {".pdf", ".png", ".jpg", ".jpeg", ".webp"}):
+            return self.send_file(target)
+        return self.send_error(404)
 
     def do_POST(self):
         parsed = urlparse(self.path)
